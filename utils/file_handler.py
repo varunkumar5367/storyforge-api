@@ -1,0 +1,181 @@
+"""
+utils/file_handler.py — I/O helpers for managing job output directories.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+from pathlib import Path
+
+import aiofiles
+
+logger = logging.getLogger("storyforge.file_handler")
+
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./output"))
+
+
+# ---------------------------------------------------------------------------
+# Directory helpers
+# ---------------------------------------------------------------------------
+def get_job_dir(job_id: str) -> Path:
+    """Return (and create) the root output directory for a given job."""
+    job_dir = OUTPUT_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    return job_dir
+
+
+def get_images_dir(job_id: str) -> Path:
+    d = get_job_dir(job_id) / "images"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_audio_dir(job_id: str) -> Path:
+    d = get_job_dir(job_id) / "audio"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_subtitles_dir(job_id: str) -> Path:
+    d = get_job_dir(job_id) / "subtitles"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_final_dir(job_id: str) -> Path:
+    d = get_job_dir(job_id) / "final"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ---------------------------------------------------------------------------
+# File-naming convention
+# ---------------------------------------------------------------------------
+def scene_image_path(job_id: str, scene_number: int) -> Path:
+    """e.g. output/{job_id}/images/scene_001.png"""
+    return get_images_dir(job_id) / f"scene_{scene_number:03d}.png"
+
+
+def scene_audio_path(job_id: str, scene_number: int) -> Path:
+    """e.g. output/{job_id}/audio/scene_001.mp3"""
+    return get_audio_dir(job_id) / f"scene_{scene_number:03d}.mp3"
+
+
+def scene_subtitle_path(job_id: str, scene_number: int) -> Path:
+    """e.g. output/{job_id}/subtitles/scene_001.srt"""
+    return get_subtitles_dir(job_id) / f"scene_{scene_number:03d}.srt"
+
+
+def master_srt_path(job_id: str) -> Path:
+    """e.g. output/{job_id}/subtitles/episode.srt — merged master subtitle file."""
+    return get_subtitles_dir(job_id) / "episode.srt"
+
+
+def final_video_path(job_id: str) -> Path:
+    return get_final_dir(job_id) / "episode.mp4"
+
+
+def final_thumbnail_path(job_id: str) -> Path:
+    return get_final_dir(job_id) / "thumbnail.png"
+
+
+def final_title_path(job_id: str) -> Path:
+    return get_final_dir(job_id) / "title.txt"
+
+
+def final_description_path(job_id: str) -> Path:
+    return get_final_dir(job_id) / "description.txt"
+
+
+def final_hashtags_path(job_id: str) -> Path:
+    return get_final_dir(job_id) / "hashtags.txt"
+
+
+def final_character_bible_path(job_id: str) -> Path:
+    return get_final_dir(job_id) / "character_bible.md"
+
+
+# ---------------------------------------------------------------------------
+# Async I/O
+# ---------------------------------------------------------------------------
+async def write_bytes(path: Path, data: bytes) -> None:
+    """Async write raw bytes to *path* (parent dirs must exist)."""
+    async with aiofiles.open(path, "wb") as f:
+        await f.write(data)
+    logger.debug("Wrote %d bytes → %s", len(data), path)
+
+
+async def write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Async write text to *path*."""
+    async with aiofiles.open(path, "w", encoding=encoding) as f:
+        await f.write(text)
+    logger.debug("Wrote %d chars → %s", len(text), path)
+
+
+async def read_text(path: Path, encoding: str = "utf-8") -> str:
+    """Async read text from *path*."""
+    async with aiofiles.open(path, "r", encoding=encoding) as f:
+        return await f.read()
+
+
+# ---------------------------------------------------------------------------
+# URL helper (for serving via /output static mount)
+# ---------------------------------------------------------------------------
+def output_url(job_id: str, *relative_parts: str) -> str:
+    """
+    Convert a filesystem path inside the output directory to a URL path
+    served by the /output static mount.
+
+    Example:
+        output_url("abc123", "final", "episode.mp4")
+        → "/output/abc123/final/episode.mp4"
+    """
+    parts = "/".join(relative_parts)
+    return f"/output/{job_id}/{parts}"
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+def delete_job_dir(job_id: str) -> None:
+    """Remove all files for a job — use with caution."""
+    job_dir = OUTPUT_DIR / job_id
+    if job_dir.exists():
+        shutil.rmtree(job_dir)
+        logger.info("Deleted job directory: %s", job_dir)
+
+
+# ---------------------------------------------------------------------------
+# Cloudinary Upload Helper
+# ---------------------------------------------------------------------------
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
+
+async def upload_asset(file_path: Path, resource_type: str = "auto") -> str | None:
+    """Uploads a file to Cloudinary if CLOUDINARY_URL is configured, returning its secure CDN URL."""
+    if not CLOUDINARY_URL or not file_path.exists():
+        return None
+
+    def _sync_upload():
+        try:
+            import cloudinary
+            import cloudinary.uploader
+            
+            # Cloudinary library configures itself from CLOUDINARY_URL env automatically.
+            response = cloudinary.uploader.upload(
+                str(file_path),
+                resource_type=resource_type,
+                folder="storyforge"
+            )
+            url = response.get("secure_url")
+            logger.info("Successfully uploaded %s to Cloudinary: %s", file_path.name, url)
+            return url
+        except Exception as e:
+            logger.error("Cloudinary upload failed for %s: %s", file_path, e)
+            return None
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _sync_upload)
+
