@@ -24,10 +24,11 @@ class Scene(BaseModel):
     """
 
     scene_number: int = Field(description="1-indexed scene position")
-    title: str = Field(description="Short, descriptive scene title")
+    title: str = Field(default="Untitled Scene", description="Short, descriptive scene title")
 
     # Primary narration field; 'text' is accepted as an alias from the LLM
     text: str = Field(
+        default="",
         description="The narration text read aloud verbatim by TTS"
     )
     # 'narration' is kept as a computed property for backward-compat with
@@ -38,18 +39,22 @@ class Scene(BaseModel):
     )
 
     setting: str = Field(
+        default="unspecified setting",
         description=(
             "Physical environment and atmosphere of the scene, "
             "e.g. 'a dimly lit stone dungeon with flickering torches'"
         )
     )
     location: str = Field(
+        default="unspecified location",
         description="Named place or area where the scene takes place"
     )
     mood: str = Field(
+        default="neutral",
         description="Emotional tone of the scene: e.g. tense, joyful, mysterious"
     )
     image_prompt: str = Field(
+        default="a storytelling scene",
         description="Detailed, vivid Pollinations.ai image generation prompt"
     )
     camera: str = Field(
