@@ -58,6 +58,11 @@ import httpx
 from models.scene import Scene
 from utils.file_handler import scene_audio_path, write_bytes
 
+try:
+    import edge_tts
+except ImportError:
+    edge_tts = None
+
 logger = logging.getLogger("storyforge.voice_generator")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,6 +303,10 @@ async def _wakeup_voiceforge() -> tuple[bool, str | None]:
         (True, None)          — server is healthy, proceed
         (False, error_string) — all attempts exhausted
     """
+    if edge_tts is not None:
+        logger.info("Local edge-tts is available. Bypassing VoiceForge API warmup.")
+        return True, None
+
     last_error = "unknown error"
 
     for attempt in range(WAKEUP_MAX_ATTEMPTS):
@@ -506,6 +515,27 @@ async def _call_tts(
         (audio_bytes, None)          on success
         (b"",         error_string)  on any failure
     """
+    if edge_tts is not None:
+        try:
+            logger.info("Generating TTS locally using edge-tts | voice=%s | speed=%.2f | pitch=%d", voice, speed, pitch)
+            # Map speed multiplier to percentage format (e.g. +10%, -5%)
+            rate_pct = int((speed - 1.0) * 100)
+            rate_str = f"{rate_pct:+d}%" if rate_pct != 0 else "+0%"
+            # Map pitch in semitones to Hz offsets (e.g. +5Hz, -3Hz)
+            pitch_str = f"{pitch:+d}Hz" if pitch != 0 else "+0Hz"
+            
+            communicate = edge_tts.Communicate(text, voice, rate=rate_str, pitch=pitch_str)
+            audio_data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data += chunk["data"]
+            
+            if audio_data:
+                return audio_data, None
+            logger.warning("Local edge-tts returned empty audio, falling back to VoiceForge API.")
+        except Exception as e:
+            logger.warning("Local edge-tts failed, falling back to VoiceForge API: %s", e)
+
     payload = {
         "text":  text,
         "voice": voice,

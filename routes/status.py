@@ -47,10 +47,30 @@ async def get_voice_sample(voice_id: str):
     if sample_path.exists():
         return FileResponse(sample_path)
 
-    # Otherwise, generate via VoiceForge
+    # Otherwise, generate via VoiceForge or locally using edge-tts
+    text = "Hello! This is a preview of my voice. I hope you like it."
+    
+    try:
+        import edge_tts
+    except ImportError:
+        edge_tts = None
+
+    if edge_tts is not None:
+        try:
+            logger.info("Generating voice preview locally using edge-tts: %s", voice_id)
+            communicate = edge_tts.Communicate(text, voice_id)
+            audio_data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data += chunk["data"]
+            if audio_data:
+                sample_path.write_bytes(audio_data)
+                return FileResponse(sample_path)
+        except Exception as e:
+            logger.warning("Local edge-tts preview failed, falling back to VoiceForge API: %s", e)
+
     voiceforge_url = settings.voiceforge_url if hasattr(settings, 'voiceforge_url') else "https://voiceforge-pzxd.onrender.com"
     voiceforge_url = voiceforge_url.rstrip("/")
-    text = "Hello! This is a preview of my voice. I hope you like it."
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

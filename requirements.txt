@@ -14,3 +14,5 @@ aiofiles==23.2.1
 python-jose[cryptography]==3.3.0
 psycopg[binary,pool]>=3.1.18
 cloudinary>=1.41.0
+edge-tts>=7.2.8
+
