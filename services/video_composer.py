@@ -341,7 +341,7 @@ async def _build_ken_burns_clip(
         "ffmpeg", "-y",
         "-threads", FFMPEG_THREADS,
         # ── Memory-conscious decoding ──────────────────────────────
-        "-buffer_size", "512k",     # Limit input buffer
+        # Limit input buffer
         "-loop", "1",
         "-framerate", str(OUTPUT_FPS),
         "-i", str(scene.image_path),
@@ -588,7 +588,7 @@ async def _burn_subtitles(
     cmd = [
         "ffmpeg", "-y",
         "-threads", FFMPEG_THREADS,
-        "-buffer_size", "512k",
+
         "-i", str(video_path),
         "-vf", vf,
         "-c:v", VIDEO_CODEC,
