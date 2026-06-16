@@ -97,6 +97,36 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 """
 
+CREATE_ANALYTICS_RENDERS_TABLE = """
+CREATE TABLE IF NOT EXISTS analytics_renders (
+    id                TEXT PRIMARY KEY,
+    job_id            TEXT NOT NULL,
+    user_id           TEXT,
+    username          TEXT,
+    total_duration    REAL NOT NULL,
+    step_durations    TEXT, -- JSON
+    peak_memory_mb    REAL NOT NULL,
+    status            TEXT NOT NULL,
+    error_message     TEXT,
+    ffmpeg_cmd        TEXT,
+    ffmpeg_stderr     TEXT,
+    credit_consumed   REAL NOT NULL DEFAULT 0.0,
+    created_at        TEXT NOT NULL
+);
+"""
+
+CREATE_ANALYTICS_EVENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS analytics_events (
+    id           TEXT PRIMARY KEY,
+    event_type   TEXT NOT NULL,
+    user_id      TEXT,
+    username     TEXT,
+    metadata     TEXT, -- JSON
+    created_at   TEXT NOT NULL
+);
+"""
+
+
 # ---------------------------------------------------------------------------
 # Compatibility Layer
 # ---------------------------------------------------------------------------
@@ -216,6 +246,8 @@ async def init_db() -> None:
         await db.execute(CREATE_JOBS_TABLE)
         await db.execute(CREATE_USERS_TABLE)
         await db.execute(CREATE_POLLEN_REQUESTS_TABLE)
+        await db.execute(CREATE_ANALYTICS_RENDERS_TABLE)
+        await db.execute(CREATE_ANALYTICS_EVENTS_TABLE)
         await db.commit()
 
         # Schema migrations: check columns for users table
@@ -543,3 +575,91 @@ async def update_user_pollen_balance(user_id: str, amount: float) -> None:
     async with DatabaseConnection(DATABASE_URL) as db:
         await db.execute("UPDATE users SET pollen_balance = ? WHERE id = ?", (amount, user_id))
         await db.commit()
+
+
+async def save_render_analytics(
+    job_id: str,
+    user_id: str | None,
+    total_duration: float,
+    step_durations: dict,
+    peak_memory_mb: float,
+    status: str,
+    error_message: str | None = None,
+    ffmpeg_cmd: str | None = None,
+    ffmpeg_stderr: str | None = None,
+    credit_consumed: float = 0.0,
+) -> None:
+    """Insert a new render analytics entry into the database."""
+    import uuid
+    from database import get_user_by_id
+    
+    # Try to fetch username
+    username = None
+    if user_id:
+        try:
+            user = await get_user_by_id(user_id)
+            if user:
+                username = user.get("username")
+        except Exception:
+            pass
+            
+    now = datetime.now(timezone.utc).isoformat()
+    row_id = str(uuid.uuid4())
+    
+    async with DatabaseConnection(DATABASE_URL) as db:
+        await db.execute(
+            """
+            INSERT INTO analytics_renders (
+                id, job_id, user_id, username, total_duration, step_durations,
+                peak_memory_mb, status, error_message, ffmpeg_cmd, ffmpeg_stderr,
+                credit_consumed, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row_id,
+                job_id,
+                user_id,
+                username,
+                total_duration,
+                json.dumps(step_durations),
+                peak_memory_mb,
+                status,
+                error_message,
+                ffmpeg_cmd,
+                ffmpeg_stderr,
+                credit_consumed,
+                now,
+            ),
+        )
+        await db.commit()
+    logger.info("Saved render analytics for job %s.", job_id)
+
+
+async def save_analytics_event(
+    event_type: str,
+    user_id: str | None = None,
+    username: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Insert a new user activity event into the database."""
+    import uuid
+    row_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    
+    async with DatabaseConnection(DATABASE_URL) as db:
+        await db.execute(
+            """
+            INSERT INTO analytics_events (id, event_type, user_id, username, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row_id,
+                event_type,
+                user_id,
+                username,
+                json.dumps(metadata or {}),
+                now,
+            ),
+        )
+        await db.commit()
+

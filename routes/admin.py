@@ -209,3 +209,163 @@ async def get_system_logs(admin: dict = Depends(get_admin_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not read logs: {str(e)}",
         )
+
+
+@router.get(
+    "/analytics",
+    summary="Get system analytics for admin dashboard",
+)
+async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
+    from datetime import datetime, timedelta, timezone
+    from database import DatabaseConnection, DATABASE_URL
+    import json
+    
+    now = datetime.now(timezone.utc)
+    one_day_ago = (now - timedelta(days=1)).isoformat()
+    thirty_days_ago = (now - timedelta(days=30)).isoformat()
+    
+    async with DatabaseConnection(DATABASE_URL) as db:
+        # ── 1. Renders ────────────────────────────────────────────────────────
+        async with db.execute("SELECT COUNT(*) as count FROM analytics_renders WHERE status = 'completed'") as cur:
+            row = await cur.fetchone()
+            completed_count = row["count"] if row else 0
+            
+        async with db.execute("SELECT COUNT(*) as count FROM analytics_renders WHERE status = 'failed'") as cur:
+            row = await cur.fetchone()
+            failed_count = row["count"] if row else 0
+            
+        async with db.execute("SELECT AVG(total_duration) as avg_dur FROM analytics_renders WHERE status = 'completed'") as cur:
+            row = await cur.fetchone()
+            avg_duration = round(row["avg_dur"], 2) if (row and row["avg_dur"] is not None) else 0.0
+            
+        async with db.execute("SELECT MAX(peak_memory_mb) as max_mem, AVG(peak_memory_mb) as avg_mem FROM analytics_renders") as cur:
+            row = await cur.fetchone()
+            max_memory = round(row["max_mem"], 2) if (row and row["max_mem"] is not None) else 0.0
+            avg_memory = round(row["avg_mem"], 2) if (row and row["avg_mem"] is not None) else 0.0
+
+        # Step durations average
+        avg_steps = {
+            "analyzing": 0.0,
+            "generating_images": 0.0,
+            "generating_voice": 0.0,
+            "generating_subtitles": 0.0,
+            "composing_video": 0.0,
+            "generating_metadata": 0.0,
+            "generating_thumbnail": 0.0
+        }
+        async with db.execute("SELECT step_durations FROM analytics_renders WHERE status = 'completed'") as cur:
+            rows = await cur.fetchall()
+            count = len(rows)
+            if count > 0:
+                sums = {k: 0.0 for k in avg_steps}
+                for r in rows:
+                    try:
+                        steps = json.loads(r["step_durations"])
+                        for k in sums:
+                            sums[k] += steps.get(k, 0.0)
+                    except Exception:
+                        pass
+                for k in avg_steps:
+                    avg_steps[k] = round(sums[k] / count, 2)
+
+        # Recent renders
+        async with db.execute(
+            """
+            SELECT id, job_id, username, total_duration, peak_memory_mb, status, created_at 
+            FROM analytics_renders 
+            ORDER BY created_at DESC LIMIT 10
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+            recent_renders = [dict(r) for r in rows]
+
+        # ── 2. FFmpeg Failures ────────────────────────────────────────────────
+        async with db.execute(
+            """
+            SELECT id, job_id, username, total_duration, status, error_message, ffmpeg_cmd, ffmpeg_stderr, created_at 
+            FROM analytics_renders 
+            WHERE status = 'failed' AND ffmpeg_stderr IS NOT NULL AND ffmpeg_stderr != ''
+            ORDER BY created_at DESC LIMIT 10
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+            ffmpeg_failures = [dict(r) for r in rows]
+
+        # ── 3. User activity & Conversion ─────────────────────────────────────
+        async with db.execute("SELECT COUNT(*) as count FROM users") as cur:
+            row = await cur.fetchone()
+            total_users = row["count"] if row else 0
+            
+        async with db.execute("SELECT COUNT(*) as count FROM users WHERE last_seen > ?", (one_day_ago,)) as cur:
+            row = await cur.fetchone()
+            active_24h = row["count"] if row else 0
+            
+        async with db.execute("SELECT COUNT(*) as count FROM users WHERE last_seen > ?", (thirty_days_ago,)) as cur:
+            row = await cur.fetchone()
+            active_30d = row["count"] if row else 0
+            
+        async with db.execute("SELECT COUNT(DISTINCT user_id) as count FROM jobs WHERE status = 'completed'") as cur:
+            row = await cur.fetchone()
+            users_with_jobs = row["count"] if row else 0
+            
+        conversion_rate = round((users_with_jobs / total_users) * 100, 2) if total_users > 0 else 0.0
+
+        # ── 4. Credits ────────────────────────────────────────────────────────
+        async with db.execute("SELECT SUM(pollen_balance) as sum_bal FROM users") as cur:
+            row = await cur.fetchone()
+            total_credits_held = round(row["sum_bal"], 2) if (row and row["sum_bal"] is not None) else 0.0
+            
+        async with db.execute("SELECT SUM(credit_consumed) as sum_consumed FROM analytics_renders WHERE status = 'completed'") as cur:
+            row = await cur.fetchone()
+            total_credits_consumed = round(row["sum_consumed"], 2) if (row and row["sum_consumed"] is not None) else 0.0
+            
+        async with db.execute("SELECT SUM(amount) as sum_req FROM pollen_requests") as cur:
+            row = await cur.fetchone()
+            total_requested = round(row["sum_req"], 2) if (row and row["sum_req"] is not None) else 0.0
+            
+        async with db.execute("SELECT SUM(amount) as sum_app FROM pollen_requests WHERE status = 'approved'") as cur:
+            row = await cur.fetchone()
+            total_approved = round(row["sum_app"], 2) if (row and row["sum_app"] is not None) else 0.0
+            
+        async with db.execute("SELECT SUM(amount) as sum_den FROM pollen_requests WHERE status = 'denied'") as cur:
+            row = await cur.fetchone()
+            total_denied = round(row["sum_den"], 2) if (row and row["sum_den"] is not None) else 0.0
+
+        async with db.execute(
+            """
+            SELECT username, SUM(credit_consumed) as consumed 
+            FROM analytics_renders 
+            WHERE status = 'completed' AND username IS NOT NULL 
+            GROUP BY username 
+            ORDER BY consumed DESC LIMIT 5
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+            credits_by_user = [dict(r) for r in rows]
+
+    return {
+        "renders": {
+            "completed": completed_count,
+            "failed": failed_count,
+            "avg_duration": avg_duration,
+            "avg_steps": avg_steps,
+            "max_memory": max_memory,
+            "avg_memory": avg_memory,
+            "recent": recent_renders
+        },
+        "failures": ffmpeg_failures,
+        "users": {
+            "total_registered": total_users,
+            "active_24h": active_24h,
+            "active_30d": active_30d,
+            "conversion_rate": conversion_rate
+        },
+        "credits": {
+            "total_held": total_credits_held,
+            "total_consumed": total_credits_consumed,
+            "total_requested": total_requested,
+            "total_approved": total_approved,
+            "total_denied": total_denied,
+            "by_user": credits_by_user
+        }
+    }

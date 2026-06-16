@@ -162,6 +162,59 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
     character_memory: dict[str, Any] = {}
     metadata: dict[str, str] = {}    # title / description / hashtags
 
+    # Durations and peak memory tracking
+    step_durations = {
+        "analyzing": 0.0,
+        "generating_images": 0.0,
+        "generating_voice": 0.0,
+        "generating_subtitles": 0.0,
+        "composing_video": 0.0,
+        "generating_metadata": 0.0,
+        "generating_thumbnail": 0.0
+    }
+    step_starts = {}
+
+    def start_step(step_name: str):
+        step_starts[step_name] = datetime.now(timezone.utc)
+
+    def end_step(step_name: str):
+        if step_name in step_starts:
+            duration = (datetime.now(timezone.utc) - step_starts[step_name]).total_seconds()
+            step_durations[step_name] = round(step_durations.get(step_name, 0.0) + duration, 2)
+
+    def get_peak_memory_mb() -> float:
+        try:
+            import resource
+            self_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            child_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+            total_kb = self_rss + child_rss
+            return round(total_kb / 1024.0, 2)
+        except Exception:
+            return 0.0
+
+    async def save_analytics(status_str: str, error_msg: str | None = None, ffmpeg_cmd: str | None = None, ffmpeg_stderr: str | None = None):
+        try:
+            from database import save_render_analytics, get_job
+            job = await get_job(job_id)
+            user_id = job.get("user_id") if job else None
+            total_dur = (datetime.now(timezone.utc) - elapsed_start).total_seconds()
+            credits_consumed = float(len(scenes)) if scenes else 0.0
+            
+            await save_render_analytics(
+                job_id=job_id,
+                user_id=user_id,
+                total_duration=round(total_dur, 2),
+                step_durations=step_durations,
+                peak_memory_mb=get_peak_memory_mb(),
+                status=status_str,
+                error_message=error_msg,
+                ffmpeg_cmd=ffmpeg_cmd,
+                ffmpeg_stderr=ffmpeg_stderr,
+                credit_consumed=credits_consumed,
+            )
+        except Exception as e:
+            logger.error("Failed to save render analytics inside pipeline: %s", e)
+
     try:
         # ── Transition to "queued" / "starting" ───────────────────────────────
         await _set_status(job_id, "analyzing", 0,
@@ -173,10 +226,14 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         await _set_status(job_id, "analyzing", 0,
                           log="Step 1/7 — Analysing story …")
 
+        start_step("analyzing")
         result = await analyze_story(story_text)
+        end_step("analyzing")
 
         if not result["success"]:
-            await _fail(job_id, f"Story analysis failed: {result['error']}")
+            err = f"Story analysis failed: {result['error']}"
+            await _fail(job_id, err)
+            await save_analytics("failed", err)
             return
 
         scenes = result["data"]["scenes"]
@@ -194,19 +251,17 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
 
         if not is_admin:
             if len(scenes) > 20:
-                await _fail(
-                    job_id,
-                    f"Limit exceeded: Story has {len(scenes)} scenes. Non-admin users are capped at 20 scenes/images per story."
-                )
+                err = f"Limit exceeded: Story has {len(scenes)} scenes. Non-admin users are capped at 20 scenes/images per story."
+                await _fail(job_id, err)
+                await save_analytics("failed", err)
                 return
             
             if user_id:
                 used_last_hour = await count_user_images_last_hour(user_id)
                 if used_last_hour + len(scenes) > 20:
-                    await _fail(
-                        job_id,
-                        f"Limit reached: Generating this story ({len(scenes)} scenes) would exceed your hourly cap of 20 images (you have used {used_last_hour} in the last hour)."
-                    )
+                    err = f"Limit reached: Generating this story ({len(scenes)} scenes) would exceed your hourly cap of 20 images (you have used {used_last_hour} in the last hour)."
+                    await _fail(job_id, err)
+                    await save_analytics("failed", err)
                     return
 
         # Generate and save the Character Bible markdown
@@ -243,7 +298,9 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
 
         wakeup_ok, wakeup_error = await warmup_voiceforge()
         if not wakeup_ok:
-            await _fail(job_id, f"VoiceForge unreachable: {wakeup_error}")
+            err = f"VoiceForge unreachable: {wakeup_error}"
+            await _fail(job_id, err)
+            await save_analytics("failed", err)
             return
 
         subtitle_results: list = []
@@ -294,9 +351,11 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                         f"Generating image …",
                 )
 
+                start_step("generating_images")
                 scenes[idx] = await generate_image_for_scene(
                     job_id, scenes[idx], character_memory
                 )
+                end_step("generating_images")
                 image_ok = scenes[idx].get("image_path") is not None
 
                 await _progress(
@@ -318,9 +377,11 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                         f"Generating voice …",
                 )
 
+                start_step("generating_voice")
                 scenes[idx] = await generate_voice_for_scene(
                     voice_client, job_id, scenes[idx], voice=voice
                 )
+                end_step("generating_voice")
                 audio_ok = scenes[idx].get("audio_path") is not None
 
                 await _progress(
@@ -339,9 +400,11 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                         f"Transcribing subtitles …",
                 )
 
+                start_step("generating_subtitles")
                 scenes[idx], sub_result = await generate_subtitle_for_scene(
                     job_id, scenes[idx]
                 )
+                end_step("generating_subtitles")
                 if sub_result is not None:
                     subtitle_results.append(sub_result)
                 subs_ok = scenes[idx].get("subtitle_path") is not None
@@ -401,7 +464,9 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         await _set_status(job_id, "composing_video", 65,
                           log="Step 5/7 — Composing episode.mp4 with FFmpeg …")
 
+        start_step("composing_video")
         result = await compose_video(job_id, scenes)
+        end_step("composing_video")
 
         if not result["success"]:
             ffmpeg_detail = result.get("ffmpeg_stderr", "")[-800:]
@@ -409,6 +474,12 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
             if ffmpeg_detail:
                 err_msg += f"\n\nFFmpeg stderr:\n{ffmpeg_detail}"
             await _fail(job_id, err_msg)
+            await save_analytics(
+                "failed",
+                error_msg=err_msg,
+                ffmpeg_cmd=result.get("ffmpeg_cmd"),
+                ffmpeg_stderr=result.get("ffmpeg_stderr")
+            )
             return
 
         video_duration = result["data"].get("duration_secs", 0.0)
@@ -429,7 +500,9 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         await _set_status(job_id, "generating_metadata", 85,
                           log="Step 6/7 — Generating YouTube metadata …")
 
+        start_step("generating_metadata")
         result = await generate_metadata(job_id, story_text, scenes)
+        end_step("generating_metadata")
 
         if result["success"]:
             metadata = result["data"]
@@ -458,11 +531,13 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         await _set_status(job_id, "generating_thumbnail", 95,
                           log="Step 7/7 — Creating YouTube thumbnail …")
 
+        start_step("generating_thumbnail")
         result = await generate_thumbnail(
             job_id,
             scenes,
             title=metadata.get("title", ""),
         )
+        end_step("generating_thumbnail")
 
         if result["success"]:
             log_msg = "Step 7 ✓ — thumbnail.png created"
@@ -510,21 +585,25 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
             download_urls.get("thumbnail", "—"),
             download_urls.get("subtitles", "—"),
         )
+        await save_analytics("completed")
 
     except asyncio.CancelledError:
         # Task was cancelled externally (server shutdown, etc.)
         logger.warning("Pipeline task cancelled | job=%s", job_id)
         await _fail(job_id, "Pipeline task was cancelled (server shutdown?).")
+        await save_analytics("failed", "Pipeline task was cancelled (server shutdown?).")
         raise   # re-raise so asyncio handles it correctly
 
     except Exception as exc:
         # Catch-all for any unhandled exception anywhere in the pipeline
         tb = traceback.format_exc()
         logger.exception("Unhandled exception in pipeline | job=%s", job_id)
+        err_msg = f"Unexpected error: {exc}\n\nTraceback:\n{tb[-2000:]}"
         await _fail(
             job_id,
-            f"Unexpected error: {exc}\n\nTraceback:\n{tb[-2000:]}",
+            err_msg,
         )
+        await save_analytics("failed", err_msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

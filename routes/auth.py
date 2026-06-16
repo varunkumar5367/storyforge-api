@@ -8,7 +8,7 @@ import uuid
 import logging
 from fastapi import APIRouter, HTTPException, Depends, status
 
-from database import get_user_by_username, create_user, hash_password, verify_password, update_user_profile, update_user_password
+from database import get_user_by_username, create_user, hash_password, verify_password, update_user_profile, update_user_password, save_analytics_event
 from models.user import UserRegister, UserLogin, UserResponse, TokenResponse, UserUpdatePayload, PasswordUpdatePayload
 from utils.auth_helper import create_access_token, get_current_user
 
@@ -35,6 +35,7 @@ async def register(payload: UserRegister) -> UserResponse:
     pwd_hash = hash_password(payload.password)
     
     user = await create_user(user_id, payload.username, pwd_hash, "user")
+    await save_analytics_event("signup", user_id=user_id, username=payload.username)
     logger.info("New user registered: %s (ID: %s)", payload.username, user_id)
     return UserResponse(
         id=user["id"],
@@ -79,6 +80,7 @@ async def login(payload: UserLogin) -> TokenResponse:
         )
     
     token = create_access_token(data={"sub": user["username"], "role": user["role"]})
+    await save_analytics_event("login", user_id=user["id"], username=user["username"])
     logger.info("User logged in: %s", user["username"])
     return TokenResponse(access_token=token, token_type="bearer", role=user["role"])
 

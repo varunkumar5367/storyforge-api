@@ -293,6 +293,7 @@ async def compose_video(
             "success": False,
             "error": f"FFmpeg failed (exit code {exc.returncode}). See ffmpeg_stderr for details.",
             "ffmpeg_stderr": exc.stderr[-STDERR_TAIL_CHARS:],
+            "ffmpeg_cmd": " ".join(exc.cmd),
         }
 
     except Exception as exc:
@@ -820,32 +821,61 @@ async def _run_ffmpeg(cmd: list[str]) -> None:
     if cmd and cmd[0] == "ffmpeg" and "-threads" not in cmd:
         cmd = [cmd[0]] + ["-threads", "2"] + cmd[1:]
 
-    logger.debug("Running: %s", " ".join(cmd[:8]) + " ...")
+    try:
+        out_path = Path(cmd[-1])
+        stderr_log_path = out_path.parent / f"ffmpeg_{out_path.stem}_stderr.log"
+    except Exception:
+        import tempfile
+        stderr_log_path = Path(tempfile.gettempdir()) / "ffmpeg_temp_stderr.log"
 
-    result = await asyncio.to_thread(
-        subprocess.run,
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    stdout_bytes, stderr_bytes = result.stdout, result.stderr
-    stderr_text = stderr_bytes.decode(errors="replace")
+    logger.debug("Running: %s (logging stderr to %s)", " ".join(cmd[:8]) + " ...", stderr_log_path.name)
 
-    if result.returncode != 0:
-        # Log the tail of stderr at ERROR level for immediate visibility
-        logger.error(
-            "FFmpeg FAILED | rc=%d | cmd=%s\nstderr (tail):\n%s",
-            result.returncode,
-            " ".join(cmd[:6]) + " ...",
-            stderr_text[-1500:],
+    try:
+        with open(stderr_log_path, "w", encoding="utf-8", errors="replace") as f_err:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=f_err,
+            )
+        
+        stderr_text = ""
+        if stderr_log_path.exists():
+            try:
+                # Read last STDERR_TAIL_CHARS bytes
+                with open(stderr_log_path, "r", encoding="utf-8", errors="replace") as f_read:
+                    f_read.seek(0, 2)
+                    size = f_read.tell()
+                    seek_pos = max(0, size - STDERR_TAIL_CHARS)
+                    f_read.seek(seek_pos)
+                    stderr_text = f_read.read()
+            except Exception as e:
+                logger.warning("Could not read stderr log: %s", e)
+
+        if result.returncode != 0:
+            # Log the tail of stderr at ERROR level for immediate visibility
+            logger.error(
+                "FFmpeg FAILED | rc=%d | cmd=%s\nstderr (tail):\n%s",
+                result.returncode,
+                " ".join(cmd[:6]) + " ...",
+                stderr_text[-1500:],
+            )
+            raise FFmpegError(cmd, result.returncode, stderr_text)
+
+        # On success, log a short summary at DEBUG level
+        logger.debug(
+            "FFmpeg OK | rc=0 | output=%s",
+            cmd[-1],  # last arg is always the output file
         )
-        raise FFmpegError(cmd, result.returncode, stderr_text)
 
-    # On success, log a short summary at DEBUG level
-    logger.debug(
-        "FFmpeg OK | rc=0 | output=%s",
-        cmd[-1],  # last arg is always the output file
-    )
+    finally:
+        # Clean up the stderr log file on success (or always, if we want to save space)
+        if stderr_log_path.exists():
+            try:
+                stderr_log_path.unlink()
+            except OSError as e:
+                logger.warning("Could not delete temporary FFmpeg stderr log file: %s", e)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

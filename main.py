@@ -10,6 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 
 if sys.platform == "win32":
+    from dotenv import load_dotenv
     load_dotenv()
     db_url = os.getenv("DATABASE_URL", "./storyforge.db")
     if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
