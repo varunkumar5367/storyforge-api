@@ -20514,3 +20514,57 @@ psycopg.InterfaceError: Psycopg cannot use the 'ProactorEventLoop' to run in asy
 2026-06-16 23:08:46,075 | INFO     | watchfiles.main | 1 change detected
 2026-06-16 23:08:46,504 | INFO     | watchfiles.main | 1 change detected
 2026-06-16 23:08:46,963 | INFO     | watchfiles.main | 1 change detected
+2026-06-17 01:14:19,261 | INFO     | uvicorn.error | Started server process [32092]
+2026-06-17 01:14:19,261 | INFO     | uvicorn.error | Waiting for application startup.
+2026-06-17 01:14:19,262 | INFO     | storyforge | 🚀 StoryForge API starting up …
+2026-06-17 01:14:20,524 | INFO     | storyforge.database | Database schema initialised at 'postgresql://postgres.jrzvxcdtnbmsjaetbqwd:storyforge%405367@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres'.
+2026-06-17 01:14:20,524 | INFO     | storyforge | ✅ Database initialized.
+2026-06-17 01:14:20,524 | INFO     | storyforge.orchestrator | Running background cleaner loop. Purging jobs older than 2026-06-16T07:44:20.524916+00:00
+2026-06-17 01:14:20,525 | INFO     | uvicorn.error | Application startup complete.
+2026-06-17 01:15:17,592 | INFO     | uvicorn.access | 127.0.0.1:61163 - "GET /api/status/pollen/balance HTTP/1.1" 401
+2026-06-17 01:15:17,593 | INFO     | uvicorn.access | 127.0.0.1:51746 - "GET /api/status/?limit=20 HTTP/1.1" 401
+2026-06-17 01:15:17,598 | INFO     | uvicorn.access | 127.0.0.1:61163 - "GET /api/status/pollen/balance HTTP/1.1" 401
+2026-06-17 01:15:17,606 | INFO     | uvicorn.access | 127.0.0.1:51746 - "GET /api/status/?limit=20 HTTP/1.1" 401
+2026-06-17 01:15:21,677 | INFO     | uvicorn.access | 127.0.0.1:51746 - "OPTIONS /api/auth/login HTTP/1.1" 200
+2026-06-17 01:15:23,224 | INFO     | storyforge.routes.auth | User logged in: varun5367
+2026-06-17 01:15:23,232 | INFO     | uvicorn.access | 127.0.0.1:51746 - "POST /api/auth/login HTTP/1.1" 200
+2026-06-17 01:15:23,492 | INFO     | uvicorn.access | 127.0.0.1:51746 - "OPTIONS /api/status/?limit=20 HTTP/1.1" 200
+2026-06-17 01:15:23,495 | INFO     | uvicorn.access | 127.0.0.1:52063 - "OPTIONS /api/status/pollen/balance HTTP/1.1" 200
+2026-06-17 01:15:23,499 | INFO     | uvicorn.access | 127.0.0.1:61113 - "OPTIONS /api/status/pollen/balance HTTP/1.1" 200
+2026-06-17 01:15:23,500 | INFO     | uvicorn.access | 127.0.0.1:60789 - "OPTIONS /api/status/?limit=20 HTTP/1.1" 200
+2026-06-17 01:15:25,518 | INFO     | uvicorn.access | 127.0.0.1:52063 - "GET /api/status/?limit=20 HTTP/1.1" 200
+2026-06-17 01:15:26,346 | INFO     | httpx | HTTP Request: GET https://gen.pollinations.ai/account/balance "HTTP/1.1 200 OK"
+2026-06-17 01:15:26,352 | INFO     | uvicorn.access | 127.0.0.1:51746 - "GET /api/status/pollen/balance HTTP/1.1" 200
+2026-06-17 01:15:26,535 | INFO     | uvicorn.access | 127.0.0.1:60789 - "GET /api/status/?limit=20 HTTP/1.1" 200
+2026-06-17 01:15:27,708 | INFO     | uvicorn.access | 127.0.0.1:60789 - "OPTIONS /api/admin/users HTTP/1.1" 200
+2026-06-17 01:15:27,713 | INFO     | uvicorn.access | 127.0.0.1:61113 - "OPTIONS /api/admin/pollen/requests HTTP/1.1" 200
+2026-06-17 01:15:27,715 | INFO     | uvicorn.access | 127.0.0.1:51746 - "OPTIONS /api/admin/logs HTTP/1.1" 200
+2026-06-17 01:15:27,722 | INFO     | uvicorn.access | 127.0.0.1:60467 - "OPTIONS /api/admin/analytics HTTP/1.1" 200
+2026-06-17 01:15:28,316 | INFO     | uvicorn.access | 127.0.0.1:61113 - "GET /api/admin/logs HTTP/1.1" 200
+2026-06-17 01:15:28,325 | INFO     | httpx | HTTP Request: GET https://gen.pollinations.ai/account/balance "HTTP/1.1 200 OK"
+2026-06-17 01:15:28,333 | INFO     | uvicorn.access | 127.0.0.1:52063 - "GET /api/status/pollen/balance HTTP/1.1" 200
+2026-06-17 01:15:28,771 | INFO     | uvicorn.access | 127.0.0.1:60789 - "GET /api/admin/users HTTP/1.1" 200
+2026-06-17 01:15:28,900 | INFO     | uvicorn.access | 127.0.0.1:51746 - "GET /api/admin/pollen/requests HTTP/1.1" 200
+2026-06-17 01:15:29,722 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/admin/analytics HTTP/1.1" 200
+2026-06-17 01:15:33,626 | INFO     | uvicorn.access | 127.0.0.1:51746 - "OPTIONS /api/status/?limit=100 HTTP/1.1" 200
+2026-06-17 01:15:33,633 | INFO     | uvicorn.access | 127.0.0.1:60789 - "OPTIONS /api/status/?limit=100 HTTP/1.1" 200
+2026-06-17 01:15:34,076 | INFO     | httpx | HTTP Request: GET https://gen.pollinations.ai/account/balance "HTTP/1.1 200 OK"
+2026-06-17 01:15:34,079 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/pollen/balance HTTP/1.1" 200
+2026-06-17 01:15:35,269 | INFO     | uvicorn.access | 127.0.0.1:51746 - "GET /api/status/?limit=100 HTTP/1.1" 200
+2026-06-17 01:15:36,113 | INFO     | httpx | HTTP Request: GET https://gen.pollinations.ai/account/balance "HTTP/1.1 200 OK"
+2026-06-17 01:15:36,115 | INFO     | uvicorn.access | 127.0.0.1:60789 - "GET /api/status/pollen/balance HTTP/1.1" 200
+2026-06-17 01:15:36,218 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/?limit=100 HTTP/1.1" 200
+2026-06-17 01:15:37,580 | INFO     | uvicorn.access | 127.0.0.1:60467 - "OPTIONS /api/auth/heartbeat HTTP/1.1" 200
+2026-06-17 01:15:38,087 | INFO     | uvicorn.access | 127.0.0.1:60467 - "POST /api/auth/heartbeat HTTP/1.1" 200
+2026-06-17 01:15:38,930 | INFO     | uvicorn.access | 127.0.0.1:51746 - "OPTIONS /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200
+2026-06-17 01:15:38,960 | INFO     | uvicorn.access | 127.0.0.1:60789 - "OPTIONS /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200
+2026-06-17 01:15:39,667 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/?limit=100 HTTP/1.1" 200
+2026-06-17 01:15:39,972 | INFO     | uvicorn.access | 127.0.0.1:51746 - "GET /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200
+2026-06-17 01:15:40,105 | INFO     | uvicorn.access | 127.0.0.1:57162 - "GET /output/edcf961c-233b-42a6-a9cc-50f199abfd46/images/scene_001.png HTTP/1.1" 404
+2026-06-17 01:15:40,108 | INFO     | uvicorn.access | 127.0.0.1:59255 - "GET /output/edcf961c-233b-42a6-a9cc-50f199abfd46/images/scene_002.png HTTP/1.1" 404
+2026-06-17 01:15:40,109 | INFO     | uvicorn.access | 127.0.0.1:63542 - "GET /output/edcf961c-233b-42a6-a9cc-50f199abfd46/images/scene_003.png HTTP/1.1" 404
+2026-06-17 01:15:41,032 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200
+2026-06-17 01:15:45,028 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200
+2026-06-17 01:15:46,096 | INFO     | uvicorn.access | 127.0.0.1:56295 - "GET /output/edcf961c-233b-42a6-a9cc-50f199abfd46/audio/scene_001.mp3 HTTP/1.1" 404
+2026-06-17 01:15:49,003 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200
+2026-06-17 01:15:53,474 | INFO     | uvicorn.access | 127.0.0.1:60467 - "GET /api/status/edcf961c-233b-42a6-a9cc-50f199abfd46 HTTP/1.1" 200

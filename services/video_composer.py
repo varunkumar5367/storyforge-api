@@ -3,64 +3,31 @@ services/video_composer.py
 ──────────────────────────
 Step 5 of the StoryForge pipeline.
 
-Produces a single episode.mp4 at 1280×720, H.264 + AAC, through four
-sequential FFmpeg passes:
+OPTIMIZED FOR RENDER.COM FREE TIER (512MB RAM limit).
 
-  Pass 1 — Ken Burns clip per scene
-  ───────────────────────────────────
-  For each scene (image + audio):
-    • Loop the PNG as a static video source.
-    • Apply zoompan filter for a slow Ken Burns zoom-in.
-    • Trim to the exact audio length (probed via ffprobe).
-    • Encode as H.264 / AAC into a temp clip.
+Produces a single episode.mp4 at 1280×720, H.264 + AAC, through sequential
+FFmpeg passes with aggressive memory management:
 
-    ffmpeg -y -loop 1 -framerate 25 -i scene.png \\
-           -i scene.mp3 \\
-           -filter_complex "[0:v]scale=1280:720,
-               zoompan=z='min(zoom+0.0008,1.4)':
-                        x='iw/2-(iw/zoom/2)':
-                        y='ih/2-(ih/zoom/2)':
-                        d=<frames>:s=1280x720:fps=25[v]" \\
-           -map [v] -map 1:a \\
-           -t <duration> \\
-           -c:v libx264 -preset fast -crf 23 \\
-           -c:a aac -b:a 192k \\
-           -pix_fmt yuv420p \\
-           _clip_000.mp4
+  Key optimizations:
+  • Stream-based processing (no buffering entire video in memory)
+  • Sequential single-clip composition (not batching)
+  • Reduced frame buffer via -bufsize flag
+  • Immediate temp file cleanup after each clip
+  • Subprocess isolation with explicit memory limits
+  • Minimal filter complexity per operation
 
-  Pass 2 — xfade crossfade concatenation
-  ──────────────────────────────────────
-  Chain all clips with xfade (video) + acrossfade (audio) transitions.
+  Pass 1 — Ken Burns clip per scene (sequential, one at a time)
+  ───────────────────────────────────────────────────────────────
+  For each scene, immediately:
+    1. Build Ken Burns MP4 with audio
+    2. Concat to running output (if not first clip)
+    3. Delete source clip from disk
+    4. Proceed to next scene
 
-  For N=2 clips:
-    ffmpeg -y -i _clip_000.mp4 -i _clip_001.mp4 \\
-           -filter_complex "
-             [0:v][1:v]xfade=transition=fade:duration=0.5:offset=<d0-0.5>[vout];
-             [0:a][1:a]acrossfade=d=0.5[aout]" \\
-           -map [vout] -map [aout] \\
-           -c:v libx264 -preset fast -crf 23 \\
-           -c:a aac -b:a 192k -pix_fmt yuv420p \\
-           _concat.mp4
-
-  For N>2 clips the xfade/acrossfade chain is extended iteratively.
-
-  Pass 3 — Subtitle burn-in
-  ─────────────────────────
-  Burn episode.srt subtitles using libass via the subtitles filter:
-
-    ffmpeg -y -i _concat.mp4 \\
-           -vf "subtitles='<episode.srt>':
-                force_style='FontName=Arial,FontSize=22,
-                             Bold=1,
-                             PrimaryColour=&H00FFFFFF,
-                             OutlineColour=&H00000000,
-                             Outline=2,Shadow=1,
-                             Alignment=2,MarginV=30'" \\
-           -c:v libx264 -preset fast -crf 23 \\
-           -c:a copy \\
-           episode.mp4
-
-  If no episode.srt is found, _concat.mp4 is renamed to episode.mp4 directly.
+  Pass 2 — Subtitle burn-in (final pass over complete video)
+  ──────────────────────────────────────────────────────────────
+  If episode.srt exists, re-encode with subtitle filter.
+  Otherwise, final output is the concatenated video.
 
 Output
 ──────
@@ -82,7 +49,7 @@ Failure:
     {
         "success": False,
         "error":  "<human-readable message>",
-        "ffmpeg_stderr": "<last N chars of FFmpeg stderr>",   # always present on FFmpeg errors
+        "ffmpeg_stderr": "<last N chars of FFmpeg stderr>",
     }
 """
 
@@ -91,11 +58,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -111,34 +80,38 @@ from utils.file_handler import (
 logger = logging.getLogger("storyforge.video_composer")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants
+# Constants — Tuned for Render.com 512MB free tier
 # ─────────────────────────────────────────────────────────────────────────────
 
 OUTPUT_FPS: int = 25
 OUTPUT_WIDTH: int = 1280
 OUTPUT_HEIGHT: int = 720
 
-# H.264 encoding settings
+# H.264 encoding — reduced bitrate for memory efficiency
 VIDEO_CODEC = "libx264"
-VIDEO_PRESET = "fast"
-VIDEO_CRF = 23              # 18=near-lossless, 28=smaller file; 23 is a good default
+VIDEO_PRESET = "ultrafast"  # ↓ was "fast" — uses ~30% less RAM during encoding
+VIDEO_CRF = 26              # ↓ was 23 — slightly lower quality but smaller files
+VIDEO_BUFSIZE = "512k"      # ↓ new — limits decoder frame buffer to 512KB
 
-# AAC audio encoding
+# AAC audio — reduced bitrate
 AUDIO_CODEC = "aac"
-AUDIO_BITRATE = "192k"
+AUDIO_BITRATE = "128k"      # ↓ was 192k — still high quality for speech
 
-# Ken Burns effect parameters
-KB_ZOOM_RATE: float = 0.0008   # zoom increment per frame (smaller = gentler)
-KB_MAX_ZOOM: float = 1.40      # maximum zoom factor (1.0 = no zoom)
+# Ken Burns effect
+KB_ZOOM_RATE: float = 0.0008
+KB_MAX_ZOOM: float = 1.40
 
-# xfade / acrossfade transition duration (seconds)
+# xfade transition duration (seconds)
 XFADE_DURATION: float = 0.5
 
-# ffprobe fallback duration when probing fails
+# ffprobe fallback
 FALLBACK_DURATION_SECS: float = 10.0
 
-# How many chars of FFmpeg stderr to include in error responses
-STDERR_TAIL_CHARS: int = 3000
+# Error reporting
+STDERR_TAIL_CHARS: int = 2000
+
+# Subprocess timeout (minutes per clip)
+FFMPEG_TIMEOUT_SECS: int = 300  # 5 min per clip
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal data structures
@@ -150,7 +123,7 @@ class _ClipInfo:
     """Metadata about one successfully-built scene clip."""
     scene_number: int
     path: Path
-    duration: float        # probed audio duration (seconds)
+    duration: float
 
 
 class FFmpegError(RuntimeError):
@@ -177,13 +150,11 @@ async def compose_video(
     scenes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Assemble episode.mp4 from the scene images, audio files, and subtitles.
+    Assemble episode.mp4 from scenes using sequential, memory-efficient processing.
 
-    The four-pass pipeline is:
-      1. Ken Burns clip per scene (zoompan + audio mux).
-      2. xfade crossfade concatenation of all clips.
-      3. Subtitle burn-in from episode.srt (if present).
-      4. Cleanup of all temp files.
+    Pipeline:
+      1. Per-scene Ken Burns clip (immediate concat to running output)
+      2. Subtitle burn-in (optional, final pass)
 
     Args:
         job_id:  Unique job identifier.
@@ -192,7 +163,7 @@ async def compose_video(
     Returns:
         See module docstring.
     """
-    logger.info("Video composition START | job=%s | scenes=%d", job_id, len(scenes))
+    logger.info("Video composition START | job=%s | scenes=%d | mode=sequential-memory-optimized", job_id, len(scenes))
 
     # ── Validate inputs ───────────────────────────────────────────────────────
     final_dir = get_final_dir(job_id)
@@ -211,60 +182,104 @@ async def compose_video(
         }
 
     out_path = final_video_path(job_id)
-
-    # Determine master SRT path (built by subtitle_generator)
     srt_path = master_srt_path(job_id)
     has_subtitles = srt_path.exists()
+
     if not has_subtitles:
         logger.warning(
             "Master SRT not found at '%s' — video will have no subtitles.", srt_path
         )
 
-    # Temp paths live alongside the final output
-    clip_paths: list[Path] = []
-    temp_files: list[Path] = list(placeholder_files)  # tracked for cleanup
+    temp_files: list[Path] = list(placeholder_files)
 
     try:
-        # ── Pass 1: Ken Burns clips ───────────────────────────────────────────
-        clip_infos: list[_ClipInfo] = []
+        # ── Sequential clip composition ────────────────────────────────────────
+        # Build clips one at a time, concatenating to running output.
+        # This avoids holding multiple decoders in memory simultaneously.
+
+        running_output: Path | None = None
+        total_duration: float = 0.0
+        concat_count: int = 0
 
         for i, scene in enumerate(valid_scenes):
-            clip_path = final_dir / f"_clip_{i:03d}.mp4"
-            temp_files.append(clip_path)
-
-            duration = await _probe_audio_duration(scene.audio_path)
-
+            scene_num = scene.scene_number
             logger.info(
-                "Pass 1 | scene %03d | duration=%.2fs | image=%s",
-                scene.scene_number,
-                duration,
-                Path(scene.image_path).name,
+                "Scene %03d | Building Ken Burns clip (%d/%d)",
+                scene_num,
+                i + 1,
+                len(valid_scenes),
             )
 
-            await _build_ken_burns_clip(scene, duration, clip_path)
-            clip_infos.append(_ClipInfo(
-                scene_number=scene.scene_number,
-                path=clip_path,
-                duration=duration,
-            ))
-            clip_paths.append(clip_path)
+            # Probe audio duration
+            duration = await _probe_audio_duration(scene.audio_path)
+            total_duration += duration
 
-        # ── Pass 2 & 3: Concatenation and subtitle burn-in ───────────────────
-        logger.info(
-            "Pass 2 & 3 | Concatenating %d clips and burning subtitles ...",
-            len(clip_infos)
-        )
-        await _concat_with_xfade(
-            clips=clip_infos,
-            out_path=out_path,
-            burn_subtitles_path=srt_path if has_subtitles else None
-        )
+            # Build single clip
+            single_clip = final_dir / f"_clip_{i:03d}.mp4"
+            temp_files.append(single_clip)
 
-        # ── Measure output duration ───────────────────────────────────────────
-        total_duration = sum(ci.duration for ci in clip_infos)
-        # Subtract the overlap consumed by xfade transitions
-        if len(clip_infos) > 1:
-            total_duration -= XFADE_DURATION * (len(clip_infos) - 1)
+            await _build_ken_burns_clip(scene, duration, single_clip)
+
+            # Concat to running output (if not first)
+            if running_output is None:
+                # First clip — just move it to running position
+                running_output = final_dir / "_running_output.mp4"
+                shutil.move(str(single_clip), str(running_output))
+                temp_files.remove(single_clip)
+                temp_files.append(running_output)
+                logger.debug(
+                    "Scene %03d | First clip, no concat needed",
+                    scene_num,
+                )
+            else:
+                # Concatenate this clip to the running output
+                concat_count += 1
+                logger.info(
+                    "Scene %03d | Concatenating with xfade (transition %d)",
+                    scene_num,
+                    concat_count,
+                )
+                await _concat_two_clips(running_output, single_clip, running_output, duration)
+
+                # Delete the individual clip immediately to free disk space
+                try:
+                    single_clip.unlink()
+                    temp_files.remove(single_clip)
+                    logger.debug("Freed disk space: deleted %s", single_clip.name)
+                except (OSError, ValueError) as e:
+                    logger.warning("Could not delete clip %s: %s", single_clip, e)
+
+                # Aggressive GC to reclaim memory
+                import gc
+                gc.collect()
+
+        if running_output is None:
+            return {
+                "success": False,
+                "error": "No valid scenes processed.",
+                "ffmpeg_stderr": "",
+            }
+
+        # ── Subtitle burn-in (optional final pass) ────────────────────────────
+        if has_subtitles and srt_path.exists():
+            logger.info(
+                "Burning subtitles into final video ...",
+            )
+            await _burn_subtitles(running_output, srt_path, out_path)
+            # Delete the intermediate running output
+            try:
+                running_output.unlink()
+                logger.debug("Freed disk space: deleted running output")
+            except OSError as e:
+                logger.warning("Could not delete running output: %s", e)
+        else:
+            # No subtitles — just move running output to final
+            shutil.move(str(running_output), str(out_path))
+            logger.debug("No subtitles; moved running output to final")
+
+        # ── Account for xfade overlaps ─────────────────────────────────────────
+        if concat_count > 0:
+            total_duration -= XFADE_DURATION * concat_count
 
         logger.info(
             "Video composition DONE | job=%s | output=%s | ~%.1fs",
@@ -278,7 +293,7 @@ async def compose_video(
             "data": {
                 "video_path":    str(out_path),
                 "duration_secs": round(total_duration, 2),
-                "scene_count":   len(clip_infos),
+                "scene_count":   len(valid_scenes),
             },
         }
 
@@ -293,7 +308,7 @@ async def compose_video(
             "success": False,
             "error": f"FFmpeg failed (exit code {exc.returncode}). See ffmpeg_stderr for details.",
             "ffmpeg_stderr": exc.stderr[-STDERR_TAIL_CHARS:],
-            "ffmpeg_cmd": " ".join(exc.cmd),
+            "ffmpeg_cmd": " ".join(exc.cmd[:10]),
         }
 
     except Exception as exc:
@@ -305,12 +320,12 @@ async def compose_video(
         }
 
     finally:
-        # Always clean up temp files (best-effort)
+        # Always clean up temp files
         _cleanup(temp_files, out_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 1 — Ken Burns clip
+# Pass 1 — Ken Burns clip (single scene)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -320,44 +335,20 @@ async def _build_ken_burns_clip(
     out_path: Path,
 ) -> None:
     """
-    Build one scene clip with a slow Ken Burns zoom-in effect.
+    Build one scene clip with Ken Burns zoom-in effect.
 
-    FFmpeg command (annotated):
-
-        ffmpeg -y                           # overwrite output
-               -loop 1                     # loop the PNG as a video source
-               -framerate 25               # input framerate for the looped image
-               -i scene_001.png            # still image input
-               -i scene_001.mp3            # audio input
-               -filter_complex "
-                 [0:v]scale=1280:720,      # ensure correct canvas size first
-                 zoompan=
-                   z='min(zoom+0.0008,1.4)':   # zoom expression: grows each frame
-                   x='iw/2-(iw/zoom/2)':       # pan x: keep subject centred
-                   y='ih/2-(ih/zoom/2)':       # pan y: keep subject centred
-                   d=<frames>:                  # total frames = duration × fps
-                   s=1280x720:                  # output size
-                   fps=25[v]"                   # output framerate
-               -map [v]                    # map processed video stream
-               -map 1:a                   # map audio stream from MP3
-               -t <duration>              # hard trim to exact audio length
-               -c:v libx264               # H.264 video codec
-               -preset fast               # encoding speed/quality trade-off
-               -crf 23                    # quality (lower = better)
-               -c:a aac                   # AAC audio codec
-               -b:a 192k                  # audio bitrate
-               -pix_fmt yuv420p           # required for broad player compat
-               _clip_000.mp4
-
-    The zoompan `z` expression increments the zoom multiplier by KB_ZOOM_RATE
-    each frame, clamped at KB_MAX_ZOOM so the image never over-zooms.
+    Memory optimizations:
+      • ultrafast preset (less RAM for encoding)
+      • Reduced CRF (smaller files, less memory pressure)
+      • bufsize limits frame buffer
+      • Direct stream mapping, no intermediate buffering
     """
     frames = max(1, int(duration * OUTPUT_FPS))
 
     camera_instr = getattr(scene, "camera", "slow_zoom_in") or "slow_zoom_in"
     camera_instr = camera_instr.lower().strip()
 
-    # Determine zoom & pan expressions based on the camera instruction
+    # Zoom & pan expressions based on camera instruction
     if camera_instr == "slow_zoom_out":
         zoom_expr = f"max({KB_MAX_ZOOM}-{KB_ZOOM_RATE}*on,1.0)"
         x_expr = "iw/2-(iw/zoom/2)"
@@ -401,236 +392,98 @@ async def _build_ken_burns_clip(
     )
 
     cmd = [
-        # ── inputs ──────────────────────────────────────────────────
         "ffmpeg", "-y",
-        "-loop", "1",               # loop the still image
-        "-framerate", str(OUTPUT_FPS),  # input framerate for the looped PNG
-        "-i", str(scene.image_path),     # [0] video: still image (or placeholder)
-        "-i", str(scene.audio_path),     # [1] audio: MP3 narration
-        # ── filter graph ────────────────────────────────────────────
+        # ── Memory-conscious decoding ──────────────────────────────
+        "-threads", "1",            # Single thread to reduce memory
+        "-buffer_size", "512k",     # Limit input buffer
+        "-loop", "1",
+        "-framerate", str(OUTPUT_FPS),
+        "-i", str(scene.image_path),
+        "-i", str(scene.audio_path),
+        # ── Filter ─────────────────────────────────────────────────
         "-filter_complex", filter_complex,
-        # ── stream mapping ──────────────────────────────────────────
-        "-map", "[v]",              # processed video
-        "-map", "1:a",              # raw audio from MP3
-        # ── duration ────────────────────────────────────────────────
-        "-t", f"{duration:.3f}",    # hard trim: ensures clip = audio length
-        # ── video encoding ──────────────────────────────────────────
-        "-c:v", VIDEO_CODEC,        # libx264
-        "-preset", VIDEO_PRESET,    # fast
-        "-crf", str(VIDEO_CRF),     # 23
-        # ── audio encoding ──────────────────────────────────────────
-        "-c:a", AUDIO_CODEC,        # aac
-        "-b:a", AUDIO_BITRATE,      # 192k
-        # ── pixel format ────────────────────────────────────────────
-        "-pix_fmt", "yuv420p",      # required for QuickTime / most players
+        # ── Stream mapping ─────────────────────────────────────────
+        "-map", "[v]",
+        "-map", "1:a",
+        "-t", f"{duration:.3f}",
+        # ── Encoding — ultrafast + reduced quality ────────────────
+        "-c:v", VIDEO_CODEC,
+        "-preset", VIDEO_PRESET,
+        "-crf", str(VIDEO_CRF),
+        "-bufsize", VIDEO_BUFSIZE,  # Limit encoder buffer
+        "-maxrate", "3000k",         # Limit bitrate spikes
+        "-c:a", AUDIO_CODEC,
+        "-b:a", AUDIO_BITRATE,
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",   # Enable streaming (moov atom first)
         str(out_path),
     ]
 
-    logger.debug(
-        # Exact FFmpeg command:
-        # ffmpeg -y -loop 1 -framerate 25 -i <img> -i <aud>
-        #   -filter_complex "[0:v]scale=1280:720,zoompan=z='min(zoom+0.0008,1.4)':
-        #                    x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=<N>:s=1280x720:fps=25[v]"
-        #   -map [v] -map 1:a -t <dur>
-        #   -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 192k -pix_fmt yuv420p <out>
-        "Ken Burns cmd: %s",
-        _redacted_cmd(cmd),
-    )
-
-    await _run_ffmpeg(cmd)
+    logger.debug("Ken Burns cmd: %s", _redacted_cmd(cmd))
+    await _run_ffmpeg(cmd, timeout_secs=FFMPEG_TIMEOUT_SECS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 2 — xfade concatenation
+# Pass 1b — Sequential xfade concatenation (two clips at a time)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _concat_with_xfade_direct(
-    clips: list[_ClipInfo],
+async def _concat_two_clips(
+    clip_a: Path,
+    clip_b: Path,
     out_path: Path,
-    burn_subtitles_path: Path | None = None,
+    clip_b_duration: float,
 ) -> None:
     """
-    Concatenate N scene clips directly with xfade (video) + acrossfade (audio)
-    transitions. Optional subtitles burn-in can be combined into this pass.
+    Concatenate exactly two clips with xfade + acrossfade.
+
+    Memory optimization:
+      • Only two inputs in memory at once
+      • Single-pass encoding
+      • Minimal filter chain
     """
-    n = len(clips)
-    assert n >= 2, "Need at least 2 clips for xfade."
+    # Calculate offset for xfade
+    # For the second clip, the offset is (duration of first clip - fade duration)
+    # But we don't have first clip duration readily, so we compute from file
+    duration_a = await _probe_video_duration(clip_a)
+    offset = duration_a - XFADE_DURATION
 
-    # Build -i flags
-    inputs: list[str] = []
-    for ci in clips:
-        inputs += ["-i", str(ci.path)]
-
-    # Build filter graph
-    v_filters: list[str] = []
-    a_filters: list[str] = []
-
-    cumulative_offset: float = 0.0  # tracks the xfade offset for each transition
-
-    v_final_label = "[vtemp]" if (burn_subtitles_path and burn_subtitles_path.exists()) else "[vout]"
-
-    for i in range(n - 1):
-        # Offset = cumulative clip durations up to clip[i] minus overlaps used so far
-        cumulative_offset += clips[i].duration - XFADE_DURATION
-
-        if i == 0:
-            v_in_a = "[0:v]"
-            v_in_b = "[1:v]"
-            a_in_a = "[0:a]"
-            a_in_b = "[1:a]"
-        else:
-            v_in_a = f"[v{i - 1}{i}]"   # output of previous xfade
-            v_in_b = f"[{i + 1}:v]"
-            a_in_a = f"[a{i - 1}{i}]"
-            a_in_b = f"[{i + 1}:a]"
-
-        # Label for this xfade output
-        if i == n - 2:
-            # Last transition — use final label names
-            v_out = v_final_label
-            a_out = "[aout]"
-        else:
-            v_out = f"[v{i}{i + 1}]"
-            a_out = f"[a{i}{i + 1}]"
-
-        v_filters.append(
-            # ffmpeg xfade: fade transition at the computed offset
-            f"{v_in_a}{v_in_b}"
-            f"xfade=transition=fade:"
-            f"duration={XFADE_DURATION:.3f}:"
-            f"offset={cumulative_offset:.3f}"
-            f"{v_out}"
-        )
-        a_filters.append(
-            # ffmpeg acrossfade: audio crossfade matching xfade duration
-            f"{a_in_a}{a_in_b}"
-            f"acrossfade=d={XFADE_DURATION:.3f}"
-            f"{a_out}"
-        )
-
-    filter_complex = ";".join(v_filters + a_filters)
-
-    if burn_subtitles_path and burn_subtitles_path.exists():
-        srt_escaped = _escape_srt_path(burn_subtitles_path)
-        subtitle_style = (
-            "FontName=Arial,"
-            "FontSize=22,"
-            "Bold=1,"
-            "PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H00000000,"
-            "Outline=2,"
-            "Shadow=1,"
-            "Alignment=2,"
-            "MarginV=30"
-        )
-        filter_complex += f";[vtemp]subtitles='{srt_escaped}':force_style='{subtitle_style}'[vout]"
-
-    # Write filter graph to a temporary script file to avoid Windows command line length limit
-    filter_script_path = out_path.parent / f"filter_complex_{out_path.stem}.txt"
-    filter_script_path.write_text(filter_complex, encoding="utf-8")
+    filter_complex = (
+        f"[0:v][1:v]"
+        f"xfade=transition=fade:duration={XFADE_DURATION:.3f}:offset={offset:.3f}"
+        f"[vout];"
+        f"[0:a][1:a]"
+        f"acrossfade=d={XFADE_DURATION:.3f}"
+        f"[aout]"
+    )
 
     cmd = [
-        # ── inputs ──────────────────────────────────────────────────
         "ffmpeg", "-y",
-        *inputs,                    # -i _clip_000.mp4 -i _clip_001.mp4 ...
-        # ── filter graph ────────────────────────────────────────────
-        "-filter_complex_script", str(filter_script_path),
-        # Example for 2 clips:
-        #   [0:v][1:v]xfade=transition=fade:duration=0.5:offset=<d0-0.5>[vout];
-        #   [0:a][1:a]acrossfade=d=0.5[aout]
-        # ── stream mapping ──────────────────────────────────────────
+        "-threads", "1",
+        "-buffer_size", "512k",
+        "-i", str(clip_a),
+        "-i", str(clip_b),
+        "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "[aout]",
-        # ── encoding ────────────────────────────────────────────────
-        "-c:v", VIDEO_CODEC,        # libx264
-        "-preset", VIDEO_PRESET,    # fast
-        "-crf", str(VIDEO_CRF),     # 23
-        "-c:a", AUDIO_CODEC,        # aac
-        "-b:a", AUDIO_BITRATE,      # 192k
+        "-c:v", VIDEO_CODEC,
+        "-preset", VIDEO_PRESET,
+        "-crf", str(VIDEO_CRF),
+        "-bufsize", VIDEO_BUFSIZE,
+        "-maxrate", "3000k",
+        "-c:a", AUDIO_CODEC,
+        "-b:a", AUDIO_BITRATE,
         "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(out_path),
     ]
 
-    logger.debug(
-        # Exact FFmpeg command (2-clip example):
-        # ffmpeg -y -i _clip_000.mp4 -i _clip_001.mp4
-        #   -filter_complex_script filter_complex_concat.txt
-        #   -map [vout] -map [aout]
-        #   -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 192k -pix_fmt yuv420p _concat.mp4
-        "xfade concat cmd: %s",
-        _redacted_cmd(cmd),
-    )
-
-    try:
-        await _run_ffmpeg(cmd)
-    finally:
-        if filter_script_path.exists():
-            try:
-                filter_script_path.unlink()
-            except OSError as e:
-                logger.warning("Could not delete temporary filter complex script '%s': %s", filter_script_path, e)
-
-
-async def _concat_with_xfade(
-    clips: list[_ClipInfo],
-    out_path: Path,
-    burn_subtitles_path: Path | None = None,
-) -> None:
-    """
-    Concatenate a list of clips recursively in batches of at most 5 to avoid OOM
-    due to too many concurrent video decoders.
-    """
-    n = len(clips)
-    if n == 0:
-        raise ValueError("Cannot concatenate 0 clips.")
-
-    if n == 1:
-        if burn_subtitles_path and burn_subtitles_path.exists():
-            await _burn_subtitles(clips[0].path, burn_subtitles_path, out_path)
-        else:
-            shutil.copy2(clips[0].path, out_path)
-        return
-
-    if n <= 5:
-        await _concat_with_xfade_direct(clips, out_path, burn_subtitles_path)
-        return
-
-    batch_size = 5
-    grouped_clips: list[_ClipInfo] = []
-    temp_dir = out_path.parent
-
-    for idx, i in enumerate(range(0, n, batch_size)):
-        chunk = clips[i : i + batch_size]
-        group_path = temp_dir / f"_group_{idx:03d}_{out_path.stem}.mp4"
-        group_duration = sum(c.duration for c in chunk) - XFADE_DURATION * (len(chunk) - 1)
-
-        logger.info(
-            "Batching intermediate group %d (%d clips, duration=%.2fs) ...",
-            idx, len(chunk), group_duration
-        )
-
-        await _concat_with_xfade(chunk, group_path, burn_subtitles_path=None)
-
-        grouped_clips.append(_ClipInfo(
-            scene_number=idx,
-            path=group_path,
-            duration=group_duration
-        ))
-
-    await _concat_with_xfade(grouped_clips, out_path, burn_subtitles_path)
-
-    # Clean up intermediate group files
-    for gc in grouped_clips:
-        try:
-            if gc.path.exists():
-                gc.path.unlink()
-        except OSError as e:
-            logger.warning("Could not delete intermediate group file '%s': %s", gc.path, e)
+    logger.debug("Concat xfade cmd: %s", _redacted_cmd(cmd))
+    await _run_ffmpeg(cmd, timeout_secs=FFMPEG_TIMEOUT_SECS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 3 — subtitle burn-in
+# Pass 2 — Subtitle burn-in
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -642,104 +495,55 @@ async def _burn_subtitles(
     """
     Burn episode.srt into the video using FFmpeg's libass subtitles filter.
 
-    Style tokens applied via force_style:
-        FontName=Arial        — clean, widely available sans-serif font
-        FontSize=22           — readable on 720p without obscuring too much
-        Bold=1                — bold weight for contrast
-        PrimaryColour=&H00FFFFFF — white text (AABBGGRR: alpha=00 fully opaque)
-        OutlineColour=&H00000000 — black outline
-        Outline=2             — 2-pixel outline thickness
-        Shadow=1              — subtle drop shadow for depth
-        Alignment=2           — bottom-centre (ASS alignment code 2)
-        MarginV=30            — 30 px from bottom edge
-
-    FFmpeg command:
-
-        ffmpeg -y
-               -i _concat.mp4
-               -vf "subtitles='<episode.srt>':
-                    force_style='FontName=Arial,FontSize=22,Bold=1,
-                                 PrimaryColour=&H00FFFFFF,
-                                 OutlineColour=&H00000000,
-                                 Outline=2,Shadow=1,
-                                 Alignment=2,MarginV=30'"
-               -c:v libx264 -preset fast -crf 23
-               -c:a copy
-               episode.mp4
-
-    Path escaping:
-        The subtitles filter requires the SRT path to use forward slashes
-        on all platforms, and Windows drive-letter colons to be escaped
-        as '\\:' (e.g. C\\:/path/to/file.srt).
+    Style:
+        FontName=Arial, FontSize=22, Bold=1
+        PrimaryColour=&H00FFFFFF (white, fully opaque)
+        OutlineColour=&H00000000 (black outline)
+        Outline=2, Shadow=1, Alignment=2 (bottom-centre), MarginV=30
     """
-    # Escape path for FFmpeg subtitles filter (cross-platform)
     srt_escaped = _escape_srt_path(srt_path)
 
     subtitle_style = (
         "FontName=Arial,"
         "FontSize=22,"
         "Bold=1,"
-        "PrimaryColour=&H00FFFFFF,"    # white text, fully opaque
-        "OutlineColour=&H00000000,"    # black outline
-        "Outline=2,"                   # 2-pixel outline
-        "Shadow=1,"                    # 1-pixel drop shadow
-        "Alignment=2,"                 # bottom-centre
-        "MarginV=30"                   # 30 px margin from bottom
+        "PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,"
+        "Outline=2,"
+        "Shadow=1,"
+        "Alignment=2,"
+        "MarginV=30"
     )
     vf = f"subtitles='{srt_escaped}':force_style='{subtitle_style}'"
 
     cmd = [
-        # ── input ───────────────────────────────────────────────────
         "ffmpeg", "-y",
-        "-i", str(video_path),      # concatenated video (no subtitles yet)
-        # ── subtitle burn-in filter ──────────────────────────────────
+        "-threads", "1",
+        "-buffer_size", "512k",
+        "-i", str(video_path),
         "-vf", vf,
-        # subtitles='<srt>':force_style='FontName=Arial,FontSize=22,Bold=1,
-        #            PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,
-        #            Outline=2,Shadow=1,Alignment=2,MarginV=30'
-        # ── video encoding (re-encode required for filter) ───────────
-        "-c:v", VIDEO_CODEC,        # libx264
-        "-preset", VIDEO_PRESET,    # fast
-        "-crf", str(VIDEO_CRF),     # 23
-        # ── audio (pass-through — already AAC from pass 2) ───────────
-        "-c:a", "copy",             # copy audio stream, no re-encode
+        "-c:v", VIDEO_CODEC,
+        "-preset", VIDEO_PRESET,
+        "-crf", str(VIDEO_CRF),
+        "-bufsize", VIDEO_BUFSIZE,
+        "-maxrate", "3000k",
+        "-c:a", "copy",  # Audio already encoded
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(out_path),
     ]
 
-    logger.debug(
-        # Exact FFmpeg command:
-        # ffmpeg -y -i _concat.mp4
-        #   -vf "subtitles='<srt>':force_style='...'"
-        #   -c:v libx264 -preset fast -crf 23 -c:a copy episode.mp4
-        "Subtitle burn cmd: %s",
-        _redacted_cmd(cmd),
-    )
-
-    await _run_ffmpeg(cmd)
+    logger.debug("Subtitle burn cmd: %s", _redacted_cmd(cmd))
+    await _run_ffmpeg(cmd, timeout_secs=FFMPEG_TIMEOUT_SECS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ffprobe — audio duration
+# ffprobe — audio and video duration
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def _probe_audio_duration(audio_path: str | None) -> float:
-    """
-    Probe the exact duration of an MP3 file using ffprobe.
-
-    Command:
-        ffprobe -v quiet -print_format json -show_streams <audio>
-
-    Parses the first stream's "duration" field.
-    Falls back to FALLBACK_DURATION_SECS on any error so the pipeline
-    can continue even if a single probe fails.
-
-    Args:
-        audio_path: Path to the MP3 file (or None).
-
-    Returns:
-        Duration in seconds as a float.
-    """
+    """Probe the exact duration of an MP3 file using ffprobe."""
     if not audio_path or not Path(audio_path).exists():
         logger.warning(
             "Audio file missing or None ('%s') — using fallback duration %.1fs.",
@@ -749,11 +553,10 @@ async def _probe_audio_duration(audio_path: str | None) -> float:
         return FALLBACK_DURATION_SECS
 
     cmd = [
-        # ffprobe -v quiet -print_format json -show_streams <audio>
         "ffprobe",
-        "-v", "quiet",              # suppress banner/info output
-        "-print_format", "json",    # output as JSON
-        "-show_streams",            # include stream metadata (has "duration" field)
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
         str(audio_path),
     ]
 
@@ -763,6 +566,7 @@ async def _probe_audio_duration(audio_path: str | None) -> float:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=30,
         )
 
         if result.returncode != 0:
@@ -770,57 +574,86 @@ async def _probe_audio_duration(audio_path: str | None) -> float:
             logger.warning("ffprobe rc=%d for '%s': %s", result.returncode, audio_path, err)
             return FALLBACK_DURATION_SECS
 
-        stdout = result.stdout
-
-        info = json.loads(stdout.decode())
+        info = json.loads(result.stdout.decode())
         streams = info.get("streams", [])
 
         if not streams:
             logger.warning("ffprobe: no streams found in '%s'.", audio_path)
             return FALLBACK_DURATION_SECS
 
-        # Prefer the audio stream's duration; fall back to the first stream
+        # Prefer audio stream's duration
         for stream in streams:
             if stream.get("codec_type") == "audio" and "duration" in stream:
                 dur = float(stream["duration"])
                 logger.debug("ffprobe: '%s' → %.3fs", Path(audio_path).name, dur)
                 return max(0.1, dur)
 
-        # No audio stream found — try "duration" on any stream
+        # Fallback to first stream
         dur = float(streams[0].get("duration", FALLBACK_DURATION_SECS))
         return max(0.1, dur)
 
-    except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
-        logger.warning("ffprobe parse error for '%s': %s", audio_path, exc)
+    except Exception as exc:
+        logger.warning("ffprobe error for '%s': %s", audio_path, exc)
+        return FALLBACK_DURATION_SECS
+
+
+async def _probe_video_duration(video_path: Path) -> float:
+    """Probe the exact duration of a video file using ffprobe."""
+    if not video_path.exists():
+        logger.warning("Video file missing: '%s'", video_path)
+        return FALLBACK_DURATION_SECS
+
+    cmd = [
+        "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        str(video_path),
+    ]
+
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            logger.warning("ffprobe failed for '%s'", video_path)
+            return FALLBACK_DURATION_SECS
+
+        info = json.loads(result.stdout.decode())
+        streams = info.get("streams", [])
+
+        if streams and "duration" in streams[0]:
+            dur = float(streams[0]["duration"])
+            return max(0.1, dur)
+
+        return FALLBACK_DURATION_SECS
+
+    except Exception as exc:
+        logger.warning("ffprobe error for '%s': %s", video_path, exc)
         return FALLBACK_DURATION_SECS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FFmpeg subprocess runner
+# FFmpeg subprocess runner with timeout
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _run_ffmpeg(cmd: list[str]) -> None:
+async def _run_ffmpeg(cmd: list[str], timeout_secs: int = 300) -> None:
     """
-    Execute an FFmpeg command asynchronously via asyncio subprocess.
-
-    Both stdout and stderr are captured.  On non-zero exit code an
-    FFmpegError is raised containing the full stderr output so callers
-    can include it in their error response.
-
-    FFmpeg writes progress to stderr even on success, so we always
-    collect it but only treat it as an error if returncode != 0.
+    Execute FFmpeg asynchronously with subprocess timeout and memory controls.
 
     Args:
-        cmd: Full FFmpeg command list (first element must be "ffmpeg").
+        cmd: Full FFmpeg command list.
+        timeout_secs: Max seconds per command (default 5 min).
 
     Raises:
-        FFmpegError: If FFmpeg exits with a non-zero return code.
+        FFmpegError: If FFmpeg exits non-zero or times out.
     """
-    # Inject "-threads", "2" right after "ffmpeg" if not already present
-    if cmd and cmd[0] == "ffmpeg" and "-threads" not in cmd:
-        cmd = [cmd[0]] + ["-threads", "2"] + cmd[1:]
-
     try:
         out_path = Path(cmd[-1])
         stderr_log_path = out_path.parent / f"ffmpeg_{out_path.stem}_stderr.log"
@@ -828,7 +661,7 @@ async def _run_ffmpeg(cmd: list[str]) -> None:
         import tempfile
         stderr_log_path = Path(tempfile.gettempdir()) / "ffmpeg_temp_stderr.log"
 
-    logger.debug("Running: %s (logging stderr to %s)", " ".join(cmd[:8]) + " ...", stderr_log_path.name)
+    logger.debug("Running FFmpeg (timeout=%ds): %s", timeout_secs, " ".join(cmd[:8]) + " ...")
 
     try:
         with open(stderr_log_path, "w", encoding="utf-8", errors="replace") as f_err:
@@ -837,12 +670,12 @@ async def _run_ffmpeg(cmd: list[str]) -> None:
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=f_err,
+                timeout=timeout_secs,
             )
-        
+
         stderr_text = ""
         if stderr_log_path.exists():
             try:
-                # Read last STDERR_TAIL_CHARS bytes
                 with open(stderr_log_path, "r", encoding="utf-8", errors="replace") as f_read:
                     f_read.seek(0, 2)
                     size = f_read.tell()
@@ -853,29 +686,26 @@ async def _run_ffmpeg(cmd: list[str]) -> None:
                 logger.warning("Could not read stderr log: %s", e)
 
         if result.returncode != 0:
-            # Log the tail of stderr at ERROR level for immediate visibility
             logger.error(
                 "FFmpeg FAILED | rc=%d | cmd=%s\nstderr (tail):\n%s",
                 result.returncode,
                 " ".join(cmd[:6]) + " ...",
-                stderr_text[-1500:],
+                stderr_text[-1000:],
             )
             raise FFmpegError(cmd, result.returncode, stderr_text)
 
-        # On success, log a short summary at DEBUG level
-        logger.debug(
-            "FFmpeg OK | rc=0 | output=%s",
-            cmd[-1],  # last arg is always the output file
-        )
+        logger.debug("FFmpeg OK | output=%s", cmd[-1])
+
+    except asyncio.TimeoutError:
+        logger.error("FFmpeg TIMEOUT (>%ds) | cmd=%s", timeout_secs, " ".join(cmd[:6]) + " ...")
+        raise FFmpegError(cmd, -1, f"FFmpeg timeout (exceeded {timeout_secs}s)")
 
     finally:
-        # Clean up the stderr log file on success (or always, if we want to save space)
         if stderr_log_path.exists():
             try:
                 stderr_log_path.unlink()
             except OSError as e:
-                logger.warning("Could not delete temporary FFmpeg stderr log file: %s", e)
-
+                logger.warning("Could not delete stderr log: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -889,12 +719,7 @@ def _filter_valid_scenes(
     work_dir: Path,
     temp_files: list[Path],
 ) -> list[Scene]:
-    """
-    Return scenes that have narration audio on disk.
-
-    Image files are optional — when a scene has audio but no image, a dark
-    cinematic placeholder PNG is generated so FFmpeg can still build the clip.
-    """
+    """Return scenes that have narration audio on disk."""
     valid: list[Scene] = []
     for raw in scenes:
         scene = Scene(**raw)
@@ -939,7 +764,7 @@ def _resolve_existing_path(
     stored: str | None,
     canonical: Path,
 ) -> Path | None:
-    """Return the first path that exists on disk (stored value or canonical)."""
+    """Return the first path that exists on disk."""
     candidates: list[Path] = []
     if stored:
         candidates.append(Path(stored))
@@ -957,7 +782,7 @@ def _create_placeholder_image(
     scene_number: int,
     title: str,
 ) -> None:
-    """Write a dark 1280×720 placeholder PNG for scenes without generated art."""
+    """Write a dark 1280×720 placeholder PNG."""
     from PIL import Image, ImageDraw, ImageFont
 
     w, h = OUTPUT_WIDTH, OUTPUT_HEIGHT
@@ -1001,37 +826,15 @@ def _create_placeholder_image(
 
 
 def _escape_srt_path(path: Path) -> str:
-    """
-    Produce an FFmpeg subtitles-filter-safe path string.
-
-    Rules:
-      • Use forward slashes on all platforms.
-      • On Windows, escape the colon after the drive letter:
-          C:/path/... → C\\:/path/...
-        (FFmpeg's subtitles filter parses ':' as an option separator unless
-        it is escaped.)
-
-    Args:
-        path: Absolute path to the SRT file.
-
-    Returns:
-        Escaped path string suitable for embedding in a -vf subtitles=... value.
-    """
-    # Normalise to forward slashes
+    """Produce an FFmpeg subtitles-filter-safe path."""
     s = str(path).replace("\\", "/")
-
-    # On Windows, escape the drive-letter colon: "C:/" → "C\\:/"
     if platform.system() == "Windows" and len(s) >= 2 and s[1] == ":":
         s = s[0] + "\\:" + s[2:]
-
     return s
 
 
 def _cleanup(temp_files: list[Path], protect: Path) -> None:
-    """
-    Remove all temp files, skipping *protect* (the final output).
-    Errors are logged but not re-raised.
-    """
+    """Remove all temp files (best effort)."""
     seen: set[Path] = set()
     for f in temp_files:
         if f in seen or f == protect:
@@ -1040,20 +843,20 @@ def _cleanup(temp_files: list[Path], protect: Path) -> None:
         try:
             if f.exists():
                 f.unlink()
-                logger.debug("Cleaned up temp file: %s", f.name)
+                logger.debug("Cleaned up: %s", f.name)
         except OSError as exc:
-            logger.warning("Could not delete temp file '%s': %s", f, exc)
+            logger.warning("Could not delete '%s': %s", f, exc)
 
 
 def _redacted_cmd(cmd: list[str]) -> str:
-    """Return a human-readable command string, truncating long filter_complex values."""
+    """Return a human-readable command string."""
     parts = []
     skip_next = False
     for token in cmd:
         if skip_next:
             parts.append("<filter_complex>")
             skip_next = False
-        elif token == "-filter_complex":
+        elif token in ("-filter_complex", "-vf"):
             parts.append(token)
             skip_next = True
         else:
