@@ -224,7 +224,7 @@ async def list_all_jobs(
     current_user: dict = Depends(get_current_user),
 ) -> JobListResponse:
     """Return a paginated list of all jobs ordered by creation time (newest first)."""
-    user_id_filter = None if current_user.get("role") == "admin" else current_user["id"]
+    user_id_filter = current_user["id"]
     rows = await list_jobs(limit=limit, user_id=user_id_filter)
     summaries = [
         JobSummary(

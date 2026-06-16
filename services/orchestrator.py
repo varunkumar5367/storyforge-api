@@ -146,10 +146,14 @@ async def _run_pipeline(job_id: str, story_text: str) -> None:
     is always left in a terminal state ("completed" or "failed") so clients
     that poll /api/status/{job_id} can always determine the outcome.
     """
-    await concurrency_semaphore.acquire()
     from utils.locks import get_job_lock
     lock = get_job_lock(job_id)
-    await lock.acquire()
+    async with concurrency_semaphore:
+        async with lock:
+            await _run_pipeline_impl(job_id, story_text)
+
+
+async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
     logger.info("═══ Pipeline START | job=%s ═══", job_id)
     elapsed_start = _now()
 
@@ -521,9 +525,6 @@ async def _run_pipeline(job_id: str, story_text: str) -> None:
             job_id,
             f"Unexpected error: {exc}\n\nTraceback:\n{tb[-2000:]}",
         )
-    finally:
-        lock.release()
-        concurrency_semaphore.release()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

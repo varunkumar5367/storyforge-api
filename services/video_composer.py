@@ -222,7 +222,6 @@ async def compose_video(
 
     # Temp paths live alongside the final output
     clip_paths: list[Path] = []
-    concat_path = final_dir / "_concat.mp4"
     temp_files: list[Path] = list(placeholder_files)  # tracked for cleanup
 
     try:
@@ -250,25 +249,16 @@ async def compose_video(
             ))
             clip_paths.append(clip_path)
 
-        # ── Pass 2: xfade concatenation ───────────────────────────────────────
-        logger.info("Pass 2 | concatenating %d clips with xfade …", len(clip_infos))
-
-        if len(clip_infos) == 1:
-            # Single scene — no transition needed; just copy the clip
-            shutil.copy2(clip_infos[0].path, concat_path)
-            temp_files.append(concat_path)
-        else:
-            temp_files.append(concat_path)
-            await _concat_with_xfade(clip_infos, concat_path)
-
-        # ── Pass 3: subtitle burn-in ──────────────────────────────────────────
-        if has_subtitles:
-            logger.info("Pass 3 | burning subtitles from %s …", srt_path.name)
-            await _burn_subtitles(concat_path, srt_path, out_path)
-            temp_files.append(concat_path)  # already added but keep for cleanup
-        else:
-            logger.info("Pass 3 | skipped (no episode.srt) — renaming concat to final.")
-            shutil.move(str(concat_path), str(out_path))
+        # ── Pass 2 & 3: Concatenation and subtitle burn-in ───────────────────
+        logger.info(
+            "Pass 2 & 3 | Concatenating %d clips and burning subtitles ...",
+            len(clip_infos)
+        )
+        await _concat_with_xfade(
+            clips=clip_infos,
+            out_path=out_path,
+            burn_subtitles_path=srt_path if has_subtitles else None
+        )
 
         # ── Measure output duration ───────────────────────────────────────────
         total_duration = sum(ci.duration for ci in clip_infos)
@@ -454,48 +444,14 @@ async def _build_ken_burns_clip(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _concat_with_xfade(
+async def _concat_with_xfade_direct(
     clips: list[_ClipInfo],
     out_path: Path,
+    burn_subtitles_path: Path | None = None,
 ) -> None:
     """
-    Concatenate N scene clips with xfade (video) + acrossfade (audio)
-    transitions, producing a single uninterrupted video stream.
-
-    For N=2 (annotated FFmpeg command):
-
-        ffmpeg -y
-               -i _clip_000.mp4        # [0]
-               -i _clip_001.mp4        # [1]
-               -filter_complex "
-                 [0:v][1:v]xfade=
-                   transition=fade:    # crossfade type
-                   duration=0.5:       # XFADE_DURATION seconds
-                   offset=<d0-0.5>    # when clip 0 ends minus transition length
-                   [vout];
-                 [0:a][1:a]acrossfade=
-                   d=0.5              # must match xfade duration
-                   [aout]"
-               -map [vout] -map [aout]
-               -c:v libx264 -preset fast -crf 23
-               -c:a aac -b:a 192k -pix_fmt yuv420p
-               _concat.mp4
-
-    For N>2 the xfade chain is:
-        [0:v][1:v]xfade=...offset=<d0-xd>[v01];
-        [v01][2:v]xfade=...offset=<d0+d1-2*xd>[v012];
-        ...
-        [v0..N-2][N-1:v]xfade=...offset=<...>[vout]
-
-    And the acrossfade chain mirrors it:
-        [0:a][1:a]acrossfade=d=<xd>[a01];
-        [a01][2:a]acrossfade=d=<xd>[a012];
-        ...
-        [a0..N-2][a..N-1]acrossfade=d=<xd>[aout]
-
-    The `offset` for the Nth transition equals the cumulative video duration
-    of all clips before it, minus (N-1) × XFADE_DURATION, because each
-    xfade consumes XFADE_DURATION seconds of the preceding clip.
+    Concatenate N scene clips directly with xfade (video) + acrossfade (audio)
+    transitions. Optional subtitles burn-in can be combined into this pass.
     """
     n = len(clips)
     assert n >= 2, "Need at least 2 clips for xfade."
@@ -510,6 +466,8 @@ async def _concat_with_xfade(
     a_filters: list[str] = []
 
     cumulative_offset: float = 0.0  # tracks the xfade offset for each transition
+
+    v_final_label = "[vtemp]" if (burn_subtitles_path and burn_subtitles_path.exists()) else "[vout]"
 
     for i in range(n - 1):
         # Offset = cumulative clip durations up to clip[i] minus overlaps used so far
@@ -529,7 +487,7 @@ async def _concat_with_xfade(
         # Label for this xfade output
         if i == n - 2:
             # Last transition — use final label names
-            v_out = "[vout]"
+            v_out = v_final_label
             a_out = "[aout]"
         else:
             v_out = f"[v{i}{i + 1}]"
@@ -551,6 +509,21 @@ async def _concat_with_xfade(
         )
 
     filter_complex = ";".join(v_filters + a_filters)
+
+    if burn_subtitles_path and burn_subtitles_path.exists():
+        srt_escaped = _escape_srt_path(burn_subtitles_path)
+        subtitle_style = (
+            "FontName=Arial,"
+            "FontSize=22,"
+            "Bold=1,"
+            "PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,"
+            "Outline=2,"
+            "Shadow=1,"
+            "Alignment=2,"
+            "MarginV=30"
+        )
+        filter_complex += f";[vtemp]subtitles='{srt_escaped}':force_style='{subtitle_style}'[vout]"
 
     # Write filter graph to a temporary script file to avoid Windows command line length limit
     filter_script_path = out_path.parent / f"filter_complex_{out_path.stem}.txt"
@@ -596,6 +569,63 @@ async def _concat_with_xfade(
                 filter_script_path.unlink()
             except OSError as e:
                 logger.warning("Could not delete temporary filter complex script '%s': %s", filter_script_path, e)
+
+
+async def _concat_with_xfade(
+    clips: list[_ClipInfo],
+    out_path: Path,
+    burn_subtitles_path: Path | None = None,
+) -> None:
+    """
+    Concatenate a list of clips recursively in batches of at most 5 to avoid OOM
+    due to too many concurrent video decoders.
+    """
+    n = len(clips)
+    if n == 0:
+        raise ValueError("Cannot concatenate 0 clips.")
+
+    if n == 1:
+        if burn_subtitles_path and burn_subtitles_path.exists():
+            await _burn_subtitles(clips[0].path, burn_subtitles_path, out_path)
+        else:
+            shutil.copy2(clips[0].path, out_path)
+        return
+
+    if n <= 5:
+        await _concat_with_xfade_direct(clips, out_path, burn_subtitles_path)
+        return
+
+    batch_size = 5
+    grouped_clips: list[_ClipInfo] = []
+    temp_dir = out_path.parent
+
+    for idx, i in enumerate(range(0, n, batch_size)):
+        chunk = clips[i : i + batch_size]
+        group_path = temp_dir / f"_group_{idx:03d}_{out_path.stem}.mp4"
+        group_duration = sum(c.duration for c in chunk) - XFADE_DURATION * (len(chunk) - 1)
+
+        logger.info(
+            "Batching intermediate group %d (%d clips, duration=%.2fs) ...",
+            idx, len(chunk), group_duration
+        )
+
+        await _concat_with_xfade(chunk, group_path, burn_subtitles_path=None)
+
+        grouped_clips.append(_ClipInfo(
+            scene_number=idx,
+            path=group_path,
+            duration=group_duration
+        ))
+
+    await _concat_with_xfade(grouped_clips, out_path, burn_subtitles_path)
+
+    # Clean up intermediate group files
+    for gc in grouped_clips:
+        try:
+            if gc.path.exists():
+                gc.path.unlink()
+        except OSError as e:
+            logger.warning("Could not delete intermediate group file '%s': %s", gc.path, e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -786,6 +816,10 @@ async def _run_ffmpeg(cmd: list[str]) -> None:
     Raises:
         FFmpegError: If FFmpeg exits with a non-zero return code.
     """
+    # Inject "-threads", "2" right after "ffmpeg" if not already present
+    if cmd and cmd[0] == "ffmpeg" and "-threads" not in cmd:
+        cmd = [cmd[0]] + ["-threads", "2"] + cmd[1:]
+
     logger.debug("Running: %s", " ".join(cmd[:8]) + " ...")
 
     result = await asyncio.to_thread(
