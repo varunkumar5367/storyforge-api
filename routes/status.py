@@ -178,7 +178,7 @@ async def get_job_status(job_id: str, current_user: dict = Depends(get_current_u
     # Concurrency control: non-admins can only see their own jobs
     if current_user.get("role") != "admin" and job.get("user_id") != current_user["id"]:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=403,
             detail="Access denied. You do not own this job.",
         )
 

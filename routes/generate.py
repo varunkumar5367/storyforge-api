@@ -414,7 +414,7 @@ async def run_single_scene_regeneration(
         from services.thumbnail_generator import generate_thumbnail
         await generate_thumbnail(job_id, scenes, title=scenes[0].get("title", ""))
         
-        download_urls = _build_download_urls(job_id)
+        download_urls = await _build_download_urls(job_id)
         await update_job(
             job_id,
             status="completed",
