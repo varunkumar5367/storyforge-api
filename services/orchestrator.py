@@ -469,7 +469,7 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         end_step("composing_video")
 
         if not result["success"]:
-            ffmpeg_detail = result.get("ffmpeg_stderr", "")[-800:]
+            ffmpeg_detail = result.get("ffmpeg_stderr", "")
             err_msg = f"Video composition failed: {result['error']}"
             if ffmpeg_detail:
                 err_msg += f"\n\nFFmpeg stderr:\n{ffmpeg_detail}"

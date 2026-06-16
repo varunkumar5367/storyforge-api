@@ -105,7 +105,7 @@ XFADE_DURATION: float = 0.5
 FALLBACK_DURATION_SECS: float = 10.0
 
 # Error reporting
-STDERR_TAIL_CHARS: int = 2000
+STDERR_TAIL_CHARS: int = 3000
 
 # Subprocess timeout (minutes per clip)
 FFMPEG_TIMEOUT_SECS: int = 300  # 5 min per clip
@@ -746,10 +746,23 @@ async def _run_ffmpeg(cmd: list[str], timeout_secs: int = 300) -> None:
             try:
                 with open(stderr_log_path, "r", encoding="utf-8", errors="replace") as f_read:
                     f_read.seek(0, 2)
-                    size = f_read.tell()
-                    seek_pos = max(0, size - STDERR_TAIL_CHARS)
-                    f_read.seek(seek_pos)
-                    stderr_text = f_read.read()
+                    file_size = f_read.tell()
+
+                    if file_size <= STDERR_TAIL_CHARS:
+                        # Small enough — read the whole file
+                        f_read.seek(0)
+                        stderr_text = f_read.read()
+                    else:
+                        # Read head (first 500 chars) + tail (last 2500 chars)
+                        # so both early errors ("Option X not found") and
+                        # late errors (filter/codec failures) are always captured.
+                        f_read.seek(0)
+                        head = f_read.read(500)
+                        seek_pos = max(500, file_size - 2500)
+                        f_read.seek(seek_pos)
+                        tail = f_read.read()
+                        stderr_text = head + "\n[...skipped...]\
+" + tail
             except Exception as e:
                 logger.warning("Could not read stderr log: %s", e)
 
