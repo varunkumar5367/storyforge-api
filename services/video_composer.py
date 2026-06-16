@@ -588,7 +588,6 @@ async def _burn_subtitles(
     cmd = [
         "ffmpeg", "-y",
         "-threads", FFMPEG_THREADS,
-
         "-i", str(video_path),
         "-vf", vf,
         "-c:v", VIDEO_CODEC,
