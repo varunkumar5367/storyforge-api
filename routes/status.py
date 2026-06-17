@@ -39,7 +39,7 @@ async def get_voice_sample(voice_id: str):
     if not re.match(r"^[a-zA-Z0-9\-]+$", voice_id):
         raise HTTPException(status_code=400, detail="Invalid voice_id format.")
 
-    output_dir = Path("./output")
+    output_dir = Path(settings.output_dir)
     samples_dir = output_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
     sample_path = samples_dir / f"{voice_id}.mp3"
@@ -69,7 +69,12 @@ async def get_voice_sample(voice_id: str):
         except Exception as e:
             logger.warning("Local edge-tts preview failed, falling back to VoiceForge API: %s", e)
 
-    voiceforge_url = settings.voiceforge_url if hasattr(settings, 'voiceforge_url') else "https://voiceforge-pzxd.onrender.com"
+    voiceforge_url = settings.voiceforge_url
+    if not voiceforge_url:
+        raise HTTPException(
+            status_code=503,
+            detail="Voice preview unavailable: configure VOICEFORGE_URL or ensure edge-tts is installed.",
+        )
     voiceforge_url = voiceforge_url.rstrip("/")
     
     try:
@@ -199,6 +204,9 @@ async def get_job_status(job_id: str, current_user: dict = Depends(get_current_u
     elif logs is None:
         logs = []
 
+    from database import get_average_scene_duration
+    avg_scene_dur = await get_average_scene_duration()
+
     return JobStatusResponse(
         job_id=job["id"],
         status=job["status"],
@@ -211,7 +219,9 @@ async def get_job_status(job_id: str, current_user: dict = Depends(get_current_u
         scenes=scenes,
         voice=job.get("voice", "en-US-JennyNeural"),
         logs=logs,
+        avg_scene_duration=avg_scene_dur,
     )
+
 
 
 @router.get(
@@ -261,7 +271,7 @@ async def delete_job_route(job_id: str, current_user: dict = Depends(get_current
         
     # Delete output directory if it exists
     try:
-        output_dir = Path("./output") / job_id
+        output_dir = Path(settings.output_dir) / job_id
         if output_dir.exists():
             shutil.rmtree(output_dir)
             logger.info("Deleted output files for job %s.", job_id)

@@ -37,6 +37,8 @@ class JobStatusResponse(BaseModel):
     scenes: list[dict[str, Any]] | None = None
     voice: str | None = Field(default="en-US-JennyNeural", description="Voice ID used for narration")
     logs: list[str] | None = Field(default=None, description="Array of real-time log statements")
+    avg_scene_duration: float | None = Field(default=None, description="Average duration of a scene render in seconds")
+
 
 
 class JobSummary(BaseModel):

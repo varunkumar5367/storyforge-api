@@ -1,0 +1,11 @@
+# Cloudflare Tunnel config template
+# Copy to: C:\Users\<YOU>\.cloudflared\config.yml
+# Replace <TUNNEL_ID> and api.yourdomain.com
+
+tunnel: <TUNNEL_ID>
+credentials-file: C:\Users\varun\.cloudflared\<TUNNEL_ID>.json
+
+ingress:
+  - hostname: api.yourdomain.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404

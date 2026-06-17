@@ -4,6 +4,7 @@ utils/file_handler.py — I/O helpers for managing job output directories.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -11,9 +12,11 @@ from pathlib import Path
 
 import aiofiles
 
+from config import settings
+
 logger = logging.getLogger("storyforge.file_handler")
 
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./output"))
+OUTPUT_DIR = Path(settings.output_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -121,22 +124,31 @@ async def read_text(path: Path, encoding: str = "utf-8") -> str:
 
 
 # ---------------------------------------------------------------------------
-# URL helper (for serving via /output static mount)
+# URL helper — public URLs use BACKEND_PUBLIC_URL when configured
 # ---------------------------------------------------------------------------
 def output_url(job_id: str, *relative_parts: str) -> str:
     """
-    Convert a filesystem path inside the output directory to a URL path
-    served by the /output static mount.
+    Convert a filesystem path inside the output directory to a public URL.
 
-    Example:
+    When BACKEND_PUBLIC_URL is set (Cloudflare Tunnel / production), returns
+    an absolute HTTPS URL.  Otherwise returns a relative path served by the
+    /output static mount (local development).
+
+    Example (production):
         output_url("abc123", "final", "episode.mp4")
+        → "https://api.example.com/output/abc123/final/episode.mp4"
+
+    Example (local):
         → "/output/abc123/final/episode.mp4"
     """
     parts = "/".join(relative_parts)
-    return f"/output/{job_id}/{parts}"
+    path = f"/output/{job_id}/{parts}"
+    base = settings.backend_public_url.rstrip("/")
+    if base:
+        return f"{base}{path}"
+    return path
 
 
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
@@ -151,23 +163,21 @@ def delete_job_dir(job_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Cloudinary Upload Helper
 # ---------------------------------------------------------------------------
-CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
-
 async def upload_asset(file_path: Path, resource_type: str = "auto") -> str | None:
     """Uploads a file to Cloudinary if CLOUDINARY_URL is configured, returning its secure CDN URL."""
-    if not CLOUDINARY_URL or not file_path.exists():
+    if not settings.cloudinary_url or not file_path.exists():
         return None
 
     def _sync_upload():
         try:
             import cloudinary
             import cloudinary.uploader
-            
-            # Cloudinary library configures itself from CLOUDINARY_URL env automatically.
+
+            os.environ.setdefault("CLOUDINARY_URL", settings.cloudinary_url or "")
             response = cloudinary.uploader.upload(
                 str(file_path),
                 resource_type=resource_type,
-                folder="storyforge"
+                folder="storyforge",
             )
             url = response.get("secure_url")
             logger.info("Successfully uploaded %s to Cloudinary: %s", file_path.name, url)
@@ -178,4 +188,3 @@ async def upload_asset(file_path: Path, resource_type: str = "auto") -> str | No
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _sync_upload)
-

@@ -53,6 +53,7 @@ from typing import Any
 
 import httpx
 
+from config import settings
 from database import update_job
 from services.image_generator import generate_image_for_scene
 from services.metadata_generator import generate_metadata
@@ -184,10 +185,19 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
 
     def get_peak_memory_mb() -> float:
         try:
+            import psutil
+            proc = psutil.Process()
+            return round(proc.memory_info().rss / (1024 * 1024), 2)
+        except ImportError:
+            pass
+        try:
             import resource
             self_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             child_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
             total_kb = self_rss + child_rss
+            import platform
+            if platform.system() == "Darwin":
+                return round(total_kb / (1024 * 1024), 2)
             return round(total_kb / 1024.0, 2)
         except Exception:
             return 0.0
@@ -887,7 +897,7 @@ async def cleanup_old_jobs():
             try:
                 logger.info("Cleaning up job %s (older than 12 hours)", job_id)
                 # Delete directory
-                job_dir = Path("output") / job_id
+                job_dir = Path(settings.output_dir) / job_id
                 if job_dir.exists():
                     shutil.rmtree(job_dir, ignore_errors=True)
                 # Delete from database

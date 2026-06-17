@@ -19,12 +19,45 @@ logger = logging.getLogger("storyforge.database")
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "./storyforge.db")
 
+import asyncio
 try:
     import psycopg
     from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
 except ImportError:
     psycopg = None
     dict_row = None
+    AsyncConnectionPool = None
+
+_pool: AsyncConnectionPool | None = None
+_pool_lock = asyncio.Lock()
+
+async def get_pg_pool() -> AsyncConnectionPool | None:
+    global _pool
+    if psycopg is None or AsyncConnectionPool is None:
+        return None
+    if _pool is None:
+        async with _pool_lock:
+            if _pool is None:
+                _pool = AsyncConnectionPool(
+                    conninfo=DATABASE_URL,
+                    open=False,
+                    min_size=1,
+                    max_size=10,
+                    kwargs={"row_factory": dict_row, "prepare_threshold": None}
+                )
+                await _pool.open()
+                logger.info("PostgreSQL connection pool initialized with prepared statements disabled.")
+    return _pool
+
+async def close_db() -> None:
+    """Close the database connection pool (PostgreSQL only)."""
+    global _pool
+    if _pool is not None:
+        logger.info("Closing PostgreSQL connection pool...")
+        await _pool.close()
+        _pool = None
+
 
 def hash_password(password: str) -> str:
     salt = "default_salt_storyforge_2026"
@@ -126,6 +159,30 @@ CREATE TABLE IF NOT EXISTS analytics_events (
 );
 """
 
+CREATE_SERVER_STATUS_TABLE = """
+CREATE TABLE IF NOT EXISTS server_status (
+    id                   TEXT PRIMARY KEY,
+    status               TEXT NOT NULL DEFAULT 'offline',
+    tunnel_url           TEXT,
+    last_ping            TEXT NOT NULL,
+    max_concurrent_tasks INTEGER NOT NULL DEFAULT 1,
+    max_concurrent_users INTEGER NOT NULL DEFAULT 5,
+    active_tasks         INTEGER NOT NULL DEFAULT 0,
+    active_users         INTEGER NOT NULL DEFAULT 0,
+    cpu_usage            REAL NOT NULL DEFAULT 0.0,
+    ram_usage            REAL NOT NULL DEFAULT 0.0
+);
+"""
+
+CREATE_WAKE_REQUESTS_TABLE = """
+CREATE TABLE IF NOT EXISTS wake_requests (
+    id          TEXT PRIMARY KEY,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    message     TEXT,
+    created_at  TEXT NOT NULL
+);
+"""
+
 
 # ---------------------------------------------------------------------------
 # Compatibility Layer
@@ -205,21 +262,30 @@ class DatabaseConnection:
         self.database_url = database_url
         self.is_postgres = database_url.startswith("postgresql://") or database_url.startswith("postgres://")
         self.conn = None
+        self.conn_ctx = None
         self.row_factory = None
 
     async def __aenter__(self):
         if self.is_postgres:
             if psycopg is None:
                 raise ImportError("PostgreSQL connection requested, but 'psycopg' package is not installed.")
-            self.conn = await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row)
+            pool = await get_pg_pool()
+            if pool is None:
+                raise ImportError("PostgreSQL connection requested, but connection pool could not be initialized.")
+            self.conn_ctx = pool.connection()
+            self.conn = await self.conn_ctx.__aenter__()
         else:
             self.conn = await aiosqlite.connect(self.database_url)
             self.conn.row_factory = aiosqlite.Row
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.conn:
-            await self.conn.close()
+        if self.is_postgres:
+            if self.conn_ctx:
+                await self.conn_ctx.__aexit__(exc_type, exc_val, exc_tb)
+        else:
+            if self.conn:
+                await self.conn.close()
 
     def execute(self, query: str, parameters=None):
         return CursorContextManager(self, query, parameters, self.is_postgres)
@@ -229,8 +295,12 @@ class DatabaseConnection:
             await self.conn.commit()
 
     async def close(self):
-        if self.conn:
-            await self.conn.close()
+        if self.is_postgres:
+            if self.conn_ctx:
+                await self.conn_ctx.__aexit__(None, None, None)
+        else:
+            if self.conn:
+                await self.conn.close()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -248,7 +318,23 @@ async def init_db() -> None:
         await db.execute(CREATE_POLLEN_REQUESTS_TABLE)
         await db.execute(CREATE_ANALYTICS_RENDERS_TABLE)
         await db.execute(CREATE_ANALYTICS_EVENTS_TABLE)
+        await db.execute(CREATE_SERVER_STATUS_TABLE)
+        await db.execute(CREATE_WAKE_REQUESTS_TABLE)
         await db.commit()
+
+        # Seed default server_status row if not exists
+        async with db.execute("SELECT * FROM server_status WHERE id = ?", ("current",)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """
+                    INSERT INTO server_status (id, status, last_ping)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("current", "offline", now),
+                )
+                await db.commit()
 
         # Schema migrations: check columns for users table
         db.row_factory = aiosqlite.Row
@@ -662,4 +748,94 @@ async def save_analytics_event(
             ),
         )
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Server Status & Wake Requests Helpers
+# ---------------------------------------------------------------------------
+async def get_server_status() -> dict:
+    """Retrieve the current server status and configuration settings."""
+    async with DatabaseConnection(DATABASE_URL) as db:
+        async with db.execute("SELECT * FROM server_status WHERE id = ?", ("current",)) as cur:
+            row = await cur.fetchone()
+            if row:
+                return dict(row)
+            # Safe fallback if row does not exist
+            return {
+                "id": "current",
+                "status": "offline",
+                "tunnel_url": None,
+                "last_ping": datetime.now(timezone.utc).isoformat(),
+                "max_concurrent_tasks": 1,
+                "max_concurrent_users": 5,
+                "active_tasks": 0,
+                "active_users": 0,
+                "cpu_usage": 0.0,
+                "ram_usage": 0.0
+            }
+
+async def update_server_status(**fields) -> None:
+    """Update server status, health metrics, and settings fields."""
+    if not fields:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + ["current"]
+    async with DatabaseConnection(DATABASE_URL) as db:
+        await db.execute(
+            f"UPDATE server_status SET {set_clause} WHERE id = ?", values
+        )
+        await db.commit()
+
+async def create_wake_request(message: str | None = None) -> dict:
+    """Create a new wake request with status = 'pending'."""
+    import uuid
+    request_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    async with DatabaseConnection(DATABASE_URL) as db:
+        await db.execute(
+            """
+            INSERT INTO wake_requests (id, status, message, created_at)
+            VALUES (?, 'pending', ?, ?)
+            """,
+            (request_id, message, now)
+        )
+        await db.commit()
+        async with db.execute("SELECT * FROM wake_requests WHERE id = ?", (request_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row)
+
+async def list_wake_requests(limit: int = 50) -> list[dict]:
+    """Retrieve the most recent wake requests (newest first)."""
+    async with DatabaseConnection(DATABASE_URL) as db:
+        if not db.is_postgres:
+            db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM wake_requests ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+async def review_wake_request(request_id: str, status: str) -> bool:
+    """Approve/accept or ignore a wake request."""
+    async with DatabaseConnection(DATABASE_URL) as db:
+        async with db.execute(
+            "UPDATE wake_requests SET status = ? WHERE id = ? AND status = 'pending'",
+            (status, request_id)
+        ) as cur:
+            rowcount = cur.rowcount
+            await db.commit()
+            return rowcount > 0
+
+async def get_average_scene_duration() -> float:
+    """Calculate the average duration (in seconds) to render a single scene based on completed renders."""
+    async with DatabaseConnection(DATABASE_URL) as db:
+        async with db.execute(
+            "SELECT SUM(total_duration) as total_dur, SUM(credit_consumed) as total_credits FROM analytics_renders WHERE status = 'completed' AND credit_consumed > 0"
+        ) as cur:
+            row = await cur.fetchone()
+            if row and row["total_dur"] is not None and row["total_credits"] is not None and row["total_credits"] > 0:
+                return float(row["total_dur"] / row["total_credits"])
+            return 45.0  # Safe default: 45 seconds per scene
+
 

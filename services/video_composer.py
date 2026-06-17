@@ -3,13 +3,13 @@ services/video_composer.py
 ──────────────────────────
 Step 5 of the StoryForge pipeline.
 
-OPTIMIZED FOR RENDER.COM FREE TIER (512MB RAM limit).
+OPTIMIZED FOR LOW-MEMORY HOSTING (recursive batching, thread-limited FFmpeg).
 
 Produces a single episode.mp4 at 1280×720, H.264 + AAC, through sequential
 FFmpeg passes with aggressive memory management:
 
   Key optimizations:
-  • FFMPEG_THREADS = 2  → caps CPU/RAM per subprocess
+  • FFMPEG_THREADS = 4  → good balance on modern laptop CPUs (benchmark with scratch/benchmark_ffmpeg_threads.py)
   • Recursive 5-clip batching  → at most 5 decoders in memory at once
   • Subtitle burn-in merged into final xfade pass  → saves one full re-encode
   • filter_complex written to a script file  → avoids command-line length limits
@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from config import settings
 from models.scene import Scene
 from utils.file_handler import (
     final_video_path,
@@ -76,7 +77,7 @@ from utils.file_handler import (
 logger = logging.getLogger("storyforge.video_composer")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants — Tuned for Render.com 512MB free tier
+# Constants — tuned for laptop hosting (override via FFMPEG_THREADS env)
 # ─────────────────────────────────────────────────────────────────────────────
 
 OUTPUT_FPS: int = 25
@@ -87,7 +88,7 @@ OUTPUT_HEIGHT: int = 720
 VIDEO_CODEC = "libx264"
 VIDEO_PRESET = "fast"
 VIDEO_CRF = 23
-FFMPEG_THREADS = "2"
+FFMPEG_THREADS = settings.ffmpeg_threads
 VIDEO_BUFSIZE = "3000k"
 
 # AAC audio
@@ -501,6 +502,7 @@ async def _concat_with_xfade(
     out_path: Path,
     burn_subtitles_path: Path | None = None,
     temp_files: list[Path] | None = None,
+    depth: int = 0,
 ) -> None:
     """
     Concatenate a list of clips recursively in batches of at most 5 to avoid OOM
@@ -527,18 +529,18 @@ async def _concat_with_xfade(
 
     for idx, i in enumerate(range(0, n, batch_size)):
         chunk = clips[i : i + batch_size]
-        group_path = temp_dir / f"_group_{idx:03d}_{out_path.name}"
+        group_path = temp_dir / f"_depth{depth}_group_{idx:03d}_{out_path.name}"
         if temp_files is not None:
             temp_files.append(group_path)
 
         group_duration = sum(c.duration for c in chunk) - XFADE_DURATION * (len(chunk) - 1)
 
         logger.info(
-            "Batching intermediate group %d (%d clips, duration=%.2fs) ...",
-            idx, len(chunk), group_duration
+            "Batching intermediate group %d (depth=%d, %d clips, duration=%.2fs) ...",
+            idx, depth, len(chunk), group_duration
         )
 
-        await _concat_with_xfade(chunk, group_path, burn_subtitles_path=None, temp_files=temp_files)
+        await _concat_with_xfade(chunk, group_path, burn_subtitles_path=None, temp_files=temp_files, depth=depth + 1)
 
         grouped_clips.append(_ClipInfo(
             scene_number=idx,
@@ -546,7 +548,7 @@ async def _concat_with_xfade(
             duration=group_duration
         ))
 
-    await _concat_with_xfade(grouped_clips, out_path, burn_subtitles_path, temp_files=temp_files)
+    await _concat_with_xfade(grouped_clips, out_path, burn_subtitles_path, temp_files=temp_files, depth=depth + 1)
 
     # Clean up intermediate group files
     for gc in grouped_clips:

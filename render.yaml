@@ -1,3 +1,8 @@
+# DEPRECATED — StoryForge backend migrated to Windows laptop + Cloudflare Tunnel.
+# This file is kept for reference only. Do not deploy to Render.
+#
+# See docs/CLOUDFLARE_TUNNEL_SETUP.md for the current deployment guide.
+
 services:
   - type: web
     name: storyforge-api
@@ -7,8 +12,6 @@ services:
     envVars:
       - key: GROQ_API_KEY
         sync: false
-      - key: VOICEFORGE_URL
-        value: https://voiceforge-pzxd.onrender.com
       - key: OUTPUT_DIR
         value: ./output
       - key: DATABASE_URL
@@ -17,7 +20,3 @@ services:
         value: "1"
       - key: PYTHONUNBUFFERED
         value: "1"
-    disk:
-      name: storyforge-storage
-      mountPath: /opt/render/project/src/output
-      sizeGB: 5

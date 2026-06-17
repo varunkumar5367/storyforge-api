@@ -369,3 +369,56 @@ async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
             "by_user": credits_by_user
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Server Control & Wake Request management
+# ---------------------------------------------------------------------------
+class ServerSettingsPayload(BaseModel):
+    max_concurrent_tasks: int
+    max_concurrent_users: int
+
+
+class WakeReviewPayload(BaseModel):
+    status: str  # accepted | ignored
+
+
+@router.get(
+    "/server-status",
+    summary="Get live server status and pending wake requests (Admin only)",
+)
+async def get_admin_server_status(admin: dict = Depends(get_admin_user)):
+    from database import get_server_status, list_wake_requests
+    status = await get_server_status()
+    wake_reqs = await list_wake_requests(limit=50)
+    return {
+        "success": True,
+        "status": status,
+        "wake_requests": wake_reqs
+    }
+
+
+@router.post(
+    "/server-settings",
+    summary="Update backend server settings limits (Admin only)",
+)
+async def update_admin_server_settings(payload: ServerSettingsPayload, admin: dict = Depends(get_admin_user)):
+    from database import update_server_status
+    await update_server_status(
+        max_concurrent_tasks=payload.max_concurrent_tasks,
+        max_concurrent_users=payload.max_concurrent_users
+    )
+    return {"success": True}
+
+
+@router.post(
+    "/wake-requests/{request_id}/review",
+    summary="Approve or ignore a pending wake request (Admin only)",
+)
+async def review_admin_wake_request(request_id: str, payload: WakeReviewPayload, admin: dict = Depends(get_admin_user)):
+    from database import review_wake_request
+    if payload.status not in ["accepted", "ignored"]:
+        raise HTTPException(status_code=400, detail="Status must be 'accepted' or 'ignored'.")
+    reviewed = await review_wake_request(request_id, payload.status)
+    return {"success": True, "reviewed": reviewed}
+

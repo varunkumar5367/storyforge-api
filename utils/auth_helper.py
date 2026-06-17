@@ -4,7 +4,6 @@ utils/auth_helper.py — JWT token creation, validation, and FastAPI dependencie
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,10 +11,11 @@ from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+from config import settings
 from database import get_user_by_username
 
-# Config
-SECRET_KEY = os.getenv("JWT_SECRET", "super_secret_key_storyforge_2026")
+# Config — JWT_SECRET_KEY required in production; dev fallback only
+SECRET_KEY = settings.effective_jwt_secret or "super_secret_key_storyforge_2026"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days token validity
 

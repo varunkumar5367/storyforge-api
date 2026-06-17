@@ -55,6 +55,7 @@ from typing import Any
 
 import httpx
 
+from config import settings
 from models.scene import Scene
 from utils.file_handler import scene_audio_path, write_bytes
 
@@ -69,13 +70,11 @@ logger = logging.getLogger("storyforge.voice_generator")
 # Configuration — all tuneable via environment or constructor kwargs
 # ─────────────────────────────────────────────────────────────────────────────
 
-VOICEFORGE_URL: str = os.getenv(
-    "VOICEFORGE_URL", "https://voiceforge-pzxd.onrender.com"
-).rstrip("/")
+VOICEFORGE_URL: str = settings.voiceforge_url.rstrip("/") if settings.voiceforge_url else ""
 
-# Endpoints
-_HEALTH_ENDPOINT = f"{VOICEFORGE_URL}/api/health"
-_TTS_ENDPOINT = f"{VOICEFORGE_URL}/api/tts"
+# Endpoints (empty when using local edge-tts only)
+_HEALTH_ENDPOINT = f"{VOICEFORGE_URL}/api/health" if VOICEFORGE_URL else ""
+_TTS_ENDPOINT = f"{VOICEFORGE_URL}/api/tts" if VOICEFORGE_URL else ""
 
 # Wakeup / health-check settings
 WAKEUP_TIMEOUT_SECS: float = 45.0        # single GET timeout (cold-start can take ~30 s)

@@ -81,6 +81,17 @@ async def upload_story(
                 detail=f"Limit reached: You have already generated {used_images} images in the last hour. Your cap of 20 images refreshes hourly.",
             )
 
+    # Concurrency Cap check
+    from database import get_server_status
+    server_stats = await get_server_status()
+    active_tasks = server_stats.get("active_tasks", 0)
+    max_tasks = server_stats.get("max_concurrent_tasks", 1)
+    if active_tasks >= max_tasks:
+        raise HTTPException(
+            status_code=429,
+            detail=f"The server is at maximum concurrent capacity ({active_tasks}/{max_tasks} active tasks). Please try again after current tasks complete.",
+        )
+
     # Create job record
     job_id = str(uuid.uuid4())
     await create_job(job_id, story_text, file.filename, voice, current_user["id"])
