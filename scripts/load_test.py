@@ -27,6 +27,27 @@ load_dotenv(dotenv_path=ROOT_DIR / ".env")
 measurements = []
 start_time = 0
 last_scene_time = 0
+peak_total_ram = 0.0
+video_composed_successfully = False
+video_file_size_mb = 0.0
+
+async def monitor_memory(pid, interval=0.1):
+    peak_memory = 0.0
+    try:
+        parent = psutil.Process(pid)
+        while True:
+            try:
+                total_mem = parent.memory_info().rss
+                for child in parent.children(recursive=True):
+                    total_mem += child.memory_info().rss
+                total_mem_mb = total_mem / (1024 * 1024)
+                if total_mem_mb > peak_memory:
+                    peak_memory = total_mem_mb
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        return peak_memory
 
 def record_measurement(scene_num):
     global last_scene_time
@@ -136,9 +157,14 @@ async def mock_generate_subtitle_for_scene(job_id, scene):
     return scene, res
 
 # Disable inter-call sleep during the test to run faster
+real_sleep = asyncio.sleep
+
 async def mock_asyncio_sleep(delay):
     if delay > 0.5:
-        await asyncio.sleep(0.01)
+        await real_sleep(0.001)
+    else:
+        await real_sleep(delay)
+
 
 # ---------------------------------------------------------------------------
 # Runner
@@ -172,8 +198,9 @@ async def run_load_test():
     
     # Fetch admin user ID to bypass non-admin scene caps
     admin_user_id = None
+    admin_username = os.getenv("ADMIN_USERNAME", "varun5367")
     async with database.DatabaseConnection(database.DATABASE_URL) as db:
-        async with db.execute("SELECT id FROM users WHERE username = ?", ("varun5367",)) as cur:
+        async with db.execute("SELECT id FROM users WHERE username = ?", (admin_username,)) as cur:
             row = await cur.fetchone()
             if row:
                 admin_user_id = row["id"]
@@ -210,8 +237,26 @@ async def run_load_test():
     for p in patches:
         p.start()
         
+    global peak_total_ram, video_composed_successfully, video_file_size_mb
     try:
+        # Start background memory monitor task
+        monitor_task = asyncio.create_task(monitor_memory(os.getpid()))
+        
         await _run_pipeline_impl(job_id, "Story text")
+        
+        # Stop memory monitor and retrieve true peak
+        monitor_task.cancel()
+        try:
+            peak_total_ram = await monitor_task
+        except Exception:
+            pass
+            
+        # Check if the final video was created
+        from utils.file_handler import final_video_path
+        final_video = final_video_path(job_id)
+        if final_video.exists():
+            video_composed_successfully = True
+            video_file_size_mb = final_video.stat().st_size / (1024 * 1024)
     finally:
         # Stop all patches
         for p in patches:
@@ -239,7 +284,7 @@ async def run_load_test():
         sys.exit(1)
         
     ram_values = [m["rss_mb"] for m in measurements]
-    peak_ram = max(ram_values)
+    peak_python_ram = max(ram_values)
     avg_scene_time = sum([m["elapsed_sec"] for m in measurements]) / len(measurements)
     
     # Calculate memory trend (linear slope between first 10 and last 10 scenes)
@@ -247,14 +292,19 @@ async def run_load_test():
     last_10_ram = sum(ram_values[-10:]) / 10
     ram_diff = last_10_ram - first_10_ram
     
-    print(f"Peak RAM RSS Usage: {peak_ram:.2f} MB")
+    print(f"Peak Python Process RAM: {peak_python_ram:.2f} MB")
+    print(f"Peak Total System RAM (incl. FFmpeg): {peak_total_ram:.2f} MB")
     print(f"Average Scene Generation Time: {avg_scene_time:.2f}s")
     print(f"Initial Memory Avg (first 10 scenes): {first_10_ram:.2f} MB")
     print(f"Final Memory Avg (last 10 scenes): {last_10_ram:.2f} MB")
     print(f"Memory Trend (Final - Initial): {ram_diff:+.2f} MB")
     
-    # Verify memory stability: memory should plateau and not grow indefinitely
-    # A difference of < 15MB over 70 scenes is extremely stable (plateaued)
+    if video_composed_successfully:
+        print(f"SUCCESS: Final video composed successfully! Size: {video_file_size_mb:.2f} MB")
+    else:
+        print("FAIL: Final video was NOT found on disk. Video composition step failed.")
+        
+    # Verify memory stability
     if ram_diff > 15.0:
         print("\nWARNING: Memory trend is positive (+{:.2f} MB). Potential leak detected.".format(ram_diff))
         print("Please check unclosed references or file descriptors.")

@@ -60,7 +60,8 @@ async def close_db() -> None:
 
 
 def hash_password(password: str) -> str:
-    salt = "default_salt_storyforge_2026"
+    import secrets
+    salt = secrets.token_hex(16)
     pwd_hash = hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000
     )
@@ -384,22 +385,24 @@ async def init_db() -> None:
             await db.commit()
 
         # Seed admin user if not exists
-        async with db.execute("SELECT * FROM users WHERE username = ?", ("varun5367",)) as cur:
+        admin_username = os.getenv("ADMIN_USERNAME", "varun5367")
+        admin_password = os.getenv("ADMIN_PASSWORD", "Varun@5367")
+        async with db.execute("SELECT * FROM users WHERE username = ?", (admin_username,)) as cur:
             row = await cur.fetchone()
             if not row:
                 import uuid
                 user_id = str(uuid.uuid4())
-                pwd_hash = hash_password("Varun@5367")
+                pwd_hash = hash_password(admin_password)
                 now = datetime.now(timezone.utc).isoformat()
                 await db.execute(
                     """
                     INSERT INTO users (id, username, password_hash, role, created_at)
                     VALUES (?, ?, ?, 'admin', ?)
                     """,
-                    (user_id, "varun5367", pwd_hash, now),
+                    (user_id, admin_username, pwd_hash, now),
                 )
                 await db.commit()
-                logger.info("Admin user 'varun5367' seeded successfully.")
+                logger.info("Admin user '%s' seeded successfully.", admin_username)
 
     logger.info("Database schema initialised at '%s'.", DATABASE_URL)
 
@@ -827,15 +830,27 @@ async def review_wake_request(request_id: str, status: str) -> bool:
             await db.commit()
             return rowcount > 0
 
+_cached_avg_scene_duration: float | None = None
+_cached_avg_scene_duration_time: float = 0.0
+
 async def get_average_scene_duration() -> float:
     """Calculate the average duration (in seconds) to render a single scene based on completed renders."""
+    global _cached_avg_scene_duration, _cached_avg_scene_duration_time
+    import time
+    now = time.time()
+    if _cached_avg_scene_duration is not None and (now - _cached_avg_scene_duration_time) < 60.0:
+        return _cached_avg_scene_duration
+
     async with DatabaseConnection(DATABASE_URL) as db:
         async with db.execute(
             "SELECT SUM(total_duration) as total_dur, SUM(credit_consumed) as total_credits FROM analytics_renders WHERE status = 'completed' AND credit_consumed > 0"
         ) as cur:
             row = await cur.fetchone()
             if row and row["total_dur"] is not None and row["total_credits"] is not None and row["total_credits"] > 0:
-                return float(row["total_dur"] / row["total_credits"])
-            return 45.0  # Safe default: 45 seconds per scene
+                _cached_avg_scene_duration = float(row["total_dur"] / row["total_credits"])
+            else:
+                _cached_avg_scene_duration = 45.0  # Safe default: 45 seconds per scene
+            _cached_avg_scene_duration_time = now
+            return _cached_avg_scene_duration
 
 

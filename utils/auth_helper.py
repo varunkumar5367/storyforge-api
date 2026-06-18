@@ -45,8 +45,7 @@ def verify_token(token: str) -> dict[str, Any] | None:
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-    token: str | None = Query(None)
+    credentials: HTTPAuthorizationCredentials | None = Depends(security)
 ) -> dict:
     """
     FastAPI dependency: Extract token, verify it, and return the database user dict.
@@ -55,8 +54,6 @@ async def get_current_user(
     auth_token = None
     if credentials:
         auth_token = credentials.credentials
-    elif token:
-        auth_token = token
 
     if not auth_token:
         raise HTTPException(

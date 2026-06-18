@@ -152,7 +152,12 @@ async def review_pollen_credits(request_id: str, payload: RequestReviewPayload, 
                     await db.execute("UPDATE users SET pollen_balance = ? WHERE id = ?", (new_bal, user_id))
             
             # Update request status
-            await review_pollen_request(request_id, payload.status)
+            from datetime import datetime, timezone
+            now_str = datetime.now(timezone.utc).isoformat()
+            await db.execute(
+                "UPDATE pollen_requests SET status = ?, reviewed_at = ? WHERE id = ?",
+                (payload.status, now_str, request_id)
+            )
             await db.commit()
             
     return {"success": True, "status": payload.status}

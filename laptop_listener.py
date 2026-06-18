@@ -43,6 +43,35 @@ tunnel_url = None
 is_running_server = False
 db_loop = None  # Asyncio loop running in the database thread
 
+def kill_process_tree(pid: int):
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except Exception:
+                pass
+        # Give them a moment to terminate, then kill
+        gone, alive = psutil.wait_procs(children, timeout=3)
+        for p in alive:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        try:
+            parent.terminate()
+            parent.wait(timeout=3)
+        except Exception:
+            try:
+                parent.kill()
+            except Exception:
+                pass
+    except psutil.NoSuchProcess:
+        pass
+    except Exception as e:
+        logger.error("Error killing process tree for PID %s: %s", pid, e)
+
 # ---------------------------------------------------------------------------
 # Background DB Worker Thread
 # ---------------------------------------------------------------------------
@@ -375,19 +404,13 @@ class ListenerDashboard(tk.Tk):
         
         logger.info("Stopping backend and tunnel processes...")
         if backend_process:
-            try:
-                backend_process.terminate()
-                backend_process.wait(timeout=5)
-            except Exception:
-                pass
+            logger.info("Stopping backend process tree...")
+            kill_process_tree(backend_process.pid)
             backend_process = None
             
         if tunnel_process:
-            try:
-                tunnel_process.terminate()
-                tunnel_process.wait(timeout=5)
-            except Exception:
-                pass
+            logger.info("Stopping tunnel process tree...")
+            kill_process_tree(tunnel_process.pid)
             tunnel_process = None
             
         tunnel_url = None
@@ -493,12 +516,20 @@ class ListenerDashboard(tk.Tk):
         
     def on_exit(self):
         if messagebox.askyesno("Exit Listener", "Are you sure you want to stop the listener daemon? This will also stop the backend server if running."):
-            self.stop_server_bg()
-            # Wait for processes to exit
-            time.sleep(1)
-            db_loop.call_soon_threadsafe(db_loop.stop)
-            self.destroy()
-            sys.exit(0)
+            self.toggle_btn.config(state="disabled")
+            self.exit_btn.config(state="disabled")
+            threading.Thread(target=self.shutdown_and_exit, daemon=True).start()
+
+    def shutdown_and_exit(self):
+        logger.info("Shutting down listener daemon...")
+        self.stop_server_flow()
+        time.sleep(1)
+        db_loop.call_soon_threadsafe(db_loop.stop)
+        self.after(0, self.destroy_and_exit)
+
+    def destroy_and_exit(self):
+        self.destroy()
+        sys.exit(0)
 
 if __name__ == "__main__":
     logger.info("Starting StoryForge Server Dashboard Dashboard Application...")

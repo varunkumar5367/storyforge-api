@@ -94,6 +94,8 @@ MAX_PROMPT_CHARS = 1500
 GEMINI_MIN_INTERVAL_SECS = 32.0
 
 _gemini_last_call_at: float = 0.0
+_gemini_lock = asyncio.Lock()
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -517,14 +519,16 @@ async def _gemini_rate_limit_wait() -> None:
     """Enforce 32 s minimum interval between Gemini API calls."""
     global _gemini_last_call_at
 
-    if _gemini_last_call_at > 0:
-        elapsed = time.monotonic() - _gemini_last_call_at
-        if elapsed < GEMINI_MIN_INTERVAL_SECS:
-            wait = GEMINI_MIN_INTERVAL_SECS - elapsed
-            logger.debug("Gemini rate limit — sleeping %.1fs", wait)
-            await asyncio.sleep(wait)
+    async with _gemini_lock:
+        if _gemini_last_call_at > 0:
+            elapsed = time.monotonic() - _gemini_last_call_at
+            if elapsed < GEMINI_MIN_INTERVAL_SECS:
+                wait = GEMINI_MIN_INTERVAL_SECS - elapsed
+                logger.debug("Gemini rate limit — sleeping %.1fs", wait)
+                await asyncio.sleep(wait)
 
-    _gemini_last_call_at = time.monotonic()
+        _gemini_last_call_at = time.monotonic()
+
 
 
 async def _download_gemini(

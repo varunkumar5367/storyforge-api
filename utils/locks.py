@@ -1,8 +1,7 @@
 # utils/locks.py
 import asyncio
-from weakref import WeakValueDictionary
 
-_JOB_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+_JOB_LOCKS: dict[str, asyncio.Lock] = {}
 
 def get_job_lock(job_id: str) -> asyncio.Lock:
     """
@@ -12,4 +11,5 @@ def get_job_lock(job_id: str) -> asyncio.Lock:
     if job_id not in _JOB_LOCKS:
         _JOB_LOCKS[job_id] = asyncio.Lock()
     return _JOB_LOCKS[job_id]
+
 

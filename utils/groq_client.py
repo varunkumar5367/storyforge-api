@@ -22,6 +22,8 @@ logger = logging.getLogger("storyforge.groq_client")
 # Singleton client
 # ---------------------------------------------------------------------------
 _client: AsyncGroq | None = None
+_rate_limited_models: dict[str, float] = {}
+
 
 
 def get_groq_client() -> AsyncGroq:
@@ -61,6 +63,7 @@ async def llm_chat(
         The assistant's message content as a plain string.
     """
     import asyncio
+    import time
     # Build list of models to try, starting with the requested model
     fallbacks = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     models_to_try = [model]
@@ -68,11 +71,18 @@ async def llm_chat(
         if fb not in models_to_try:
             models_to_try.append(fb)
 
+    # Filter out models that are currently marked as rate-limited
+    now = time.monotonic()
+    available_models = [m for m in models_to_try if _rate_limited_models.get(m, 0.0) < now]
+    if not available_models:
+        # If all are rate-limited, fall back to the last one anyway
+        available_models = [models_to_try[-1]]
+
     client = get_groq_client()
     last_exc = None
     max_retries = 3
 
-    for model_name in models_to_try:
+    for model_name in available_models:
         for attempt in range(max_retries):
             try:
                 logger.info(
@@ -103,6 +113,8 @@ async def llm_chat(
                 is_decommissioned = "decommissioned" in exc_str.lower() or "not found" in exc_str.lower() or "does not exist" in exc_str.lower() or "not supported" in exc_str.lower()
 
                 if is_rate_limit or is_overloaded:
+                    # Mark model as rate-limited for 10 minutes (600 seconds)
+                    _rate_limited_models[model_name] = time.monotonic() + 600.0
                     wait_time = 2.0 ** (attempt + 1)
                     logger.warning(
                         "Model %s failed with rate limit/overload (%s). Sleeping %.1fs before retry...",
@@ -126,6 +138,7 @@ async def llm_chat(
 
     logger.error("All LLM fallback models exhausted. Last error: %s", last_exc)
     raise last_exc
+
 
 
 # ---------------------------------------------------------------------------

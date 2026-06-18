@@ -322,102 +322,125 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
             log=f"Steps 2–4/7 — Per-scene image + voice + subtitle ({total_scenes} scenes) …",
         )
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(TTS_TIMEOUT_SECS),
-            follow_redirects=True,
-        ) as voice_client:
-            for idx, raw_scene in enumerate(scenes):
-                scene_num = idx + 1
-                scene_label = f"{scene_num:03d}"
+        # Create a semaphore to limit parallel scene processing
+        asset_semaphore = asyncio.Semaphore(4)
+        progress_lock = asyncio.Lock()
+        completed_steps = 0
 
+        async def _process_single_scene(idx: int, raw_scene: dict, voice_client: httpx.AsyncClient) -> Any:
+            nonlocal completed_steps
+            scene_num = idx + 1
+            scene_label = f"{scene_num:03d}"
+
+            # Stagger startup to prevent hammering APIs simultaneously
+            await asyncio.sleep(idx * 0.5)
+
+            async with asset_semaphore:
                 # ── Pause Check ──
-                from database import get_job
-                job_check = await get_job(job_id)
-                if job_check and job_check.get("status") == "paused":
-                    logger.info("[job=%s] Pipeline PAUSED by user. Entering sleep loop.", job_id)
-                    while True:
-                        await asyncio.sleep(2)
-                        job_check = await get_job(job_id)
-                        if not job_check:
-                            return  # Job was deleted
-                        if job_check.get("status") == "failed":
-                            logger.info("[job=%s] Pipeline CANCELLED during pause.", job_id)
-                            return
-                        if job_check.get("status") != "paused":
-                            logger.info("[job=%s] Pipeline RESUMED.", job_id)
-                            break
+                async def check_pause():
+                    from database import get_job
+                    job_check = await get_job(job_id)
+                    if job_check and job_check.get("status") == "paused":
+                        logger.info("[job=%s] Pipeline PAUSED by user. Entering sleep loop for scene %s.", job_id, scene_label)
+                        while True:
+                            await asyncio.sleep(2)
+                            job_check = await get_job(job_id)
+                            if not job_check:
+                                raise asyncio.CancelledError()
+                            if job_check.get("status") == "failed":
+                                logger.info("[job=%s] Pipeline CANCELLED during pause for scene %s.", job_id, scene_label)
+                                raise asyncio.CancelledError()
+                            if job_check.get("status") != "paused":
+                                logger.info("[job=%s] Pipeline RESUMED for scene %s.", job_id, scene_label)
+                                break
 
-                def _scene_progress(step: int) -> int:
-                    """step 1=image, 2=voice, 3=subtitle (all steps for this scene)."""
-                    fraction = (idx + step / 3) / total_scenes
-                    return scene_block_start + int(fraction * scene_block_size)
+                # Helper to update progress and status in database
+                async def update_progress_after_step(status_label: str):
+                    nonlocal completed_steps
+                    async with progress_lock:
+                        completed_steps += 1
+                        fraction = completed_steps / (total_scenes * 3)
+                        prog = scene_block_start + int(fraction * scene_block_size)
+                        prog = min(prog, scene_block_end)
+                        await _progress(
+                            job_id,
+                            status=status_label,
+                            progress=prog,
+                            scenes=scenes,
+                        )
 
-                # ── 2a. Image for this scene ──────────────────────────────────
-                await _set_status(
-                    job_id,
-                    "generating_images",
-                    _scene_progress(0),
-                    log=f"[job={job_id} | scene={scene_label} | {scene_num}/{total_scenes}] "
-                        f"Generating image …",
-                )
+                # ── Step 2a: Image ──
+                await check_pause()
+                
+                async with progress_lock:
+                    fraction = completed_steps / (total_scenes * 3)
+                    prog = scene_block_start + int(fraction * scene_block_size)
+                    prog = min(prog, scene_block_end)
+                    await _set_status(
+                        job_id,
+                        "generating_images",
+                        prog,
+                        log=f"[job={job_id} | scene={scene_label} | {scene_num}/{total_scenes}] Generating image …"
+                    )
 
                 start_step("generating_images")
-                scenes[idx] = await generate_image_for_scene(
-                    job_id, scenes[idx], character_memory
+                updated_scene = await generate_image_for_scene(
+                    job_id, raw_scene, character_memory
                 )
                 end_step("generating_images")
-                image_ok = scenes[idx].get("image_path") is not None
+                image_ok = updated_scene.get("image_path") is not None
+                
+                # Update shared list
+                scenes[idx] = updated_scene
+                await update_progress_after_step("generating_images")
 
-                await _progress(
-                    job_id,
-                    status="generating_images",
-                    progress=_scene_progress(1),
-                    scenes=scenes,
-                )
-
-                # ── 3a. Voice for this scene ──────────────────────────────────
-                if idx > 0:
-                    await asyncio.sleep(TTS_INTER_CALL_DELAY_SECS)
-
-                await _set_status(
-                    job_id,
-                    "generating_voice",
-                    _scene_progress(1),
-                    log=f"[job={job_id} | scene={scene_label} | {scene_num}/{total_scenes}] "
-                        f"Generating voice …",
-                )
+                # ── Step 3a: Voice ──
+                await check_pause()
+                
+                async with progress_lock:
+                    fraction = completed_steps / (total_scenes * 3)
+                    prog = scene_block_start + int(fraction * scene_block_size)
+                    prog = min(prog, scene_block_end)
+                    await _set_status(
+                        job_id,
+                        "generating_voice",
+                        prog,
+                        log=f"[job={job_id} | scene={scene_label} | {scene_num}/{total_scenes}] Generating voice …"
+                    )
 
                 start_step("generating_voice")
-                scenes[idx] = await generate_voice_for_scene(
-                    voice_client, job_id, scenes[idx], voice=voice
+                updated_scene = await generate_voice_for_scene(
+                    voice_client, job_id, updated_scene, voice=voice
                 )
                 end_step("generating_voice")
-                audio_ok = scenes[idx].get("audio_path") is not None
+                audio_ok = updated_scene.get("audio_path") is not None
+                
+                scenes[idx] = updated_scene
+                await update_progress_after_step("generating_voice")
 
-                await _progress(
-                    job_id,
-                    status="generating_voice",
-                    progress=_scene_progress(2),
-                    scenes=scenes,
-                )
-
-                # ── 4a. Subtitles for this scene ──────────────────────────────
-                await _set_status(
-                    job_id,
-                    "generating_subtitles",
-                    _scene_progress(2),
-                    log=f"[job={job_id} | scene={scene_label} | {scene_num}/{total_scenes}] "
-                        f"Transcribing subtitles …",
-                )
+                # ── Step 4a: Subtitles ──
+                await check_pause()
+                
+                async with progress_lock:
+                    fraction = completed_steps / (total_scenes * 3)
+                    prog = scene_block_start + int(fraction * scene_block_size)
+                    prog = min(prog, scene_block_end)
+                    await _set_status(
+                        job_id,
+                        "generating_subtitles",
+                        prog,
+                        log=f"[job={job_id} | scene={scene_label} | {scene_num}/{total_scenes}] Transcribing subtitles …"
+                    )
 
                 start_step("generating_subtitles")
-                scenes[idx], sub_result = await generate_subtitle_for_scene(
-                    job_id, scenes[idx]
+                updated_scene, sub_result = await generate_subtitle_for_scene(
+                    job_id, updated_scene
                 )
                 end_step("generating_subtitles")
-                if sub_result is not None:
-                    subtitle_results.append(sub_result)
-                subs_ok = scenes[idx].get("subtitle_path") is not None
+                subs_ok = updated_scene.get("subtitle_path") is not None
+                
+                scenes[idx] = updated_scene
+                await update_progress_after_step("generating_subtitles")
 
                 image_tag = "✓" if image_ok else "✗"
                 audio_tag = "✓" if audio_ok else "✗"
@@ -433,12 +456,18 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                 )
                 await _append_log(job_id, msg)
 
-                await _progress(
-                    job_id,
-                    status="generating_subtitles",
-                    progress=_scene_progress(3),
-                    scenes=scenes,
-                )
+                return sub_result
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(TTS_TIMEOUT_SECS),
+            follow_redirects=True,
+        ) as voice_client:
+            tasks = [
+                _process_single_scene(idx, scenes[idx], voice_client)
+                for idx in range(total_scenes)
+            ]
+            results = await asyncio.gather(*tasks)
+            subtitle_results = [r for r in results if r is not None]
 
         # ── Build master episode.srt after all scenes ─────────────────────────
         master_srt = await finalize_master_subtitles(

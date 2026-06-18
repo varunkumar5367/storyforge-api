@@ -85,11 +85,50 @@ OUTPUT_WIDTH: int = 1280
 OUTPUT_HEIGHT: int = 720
 
 # H.264 encoding
-VIDEO_CODEC = "libx264"
-VIDEO_PRESET = "fast"
-VIDEO_CRF = 23
+VIDEO_CODEC = os.getenv("VIDEO_CODEC", "libx264")
+VIDEO_PRESET = os.getenv("VIDEO_PRESET", "fast")
+try:
+    VIDEO_CRF = int(os.getenv("VIDEO_CRF", "23"))
+except ValueError:
+    VIDEO_CRF = 23
 FFMPEG_THREADS = settings.ffmpeg_threads
 VIDEO_BUFSIZE = "3000k"
+
+
+def _get_video_encoding_params() -> list[str]:
+    """Return the correct video encoding parameters based on the codec."""
+    params = ["-c:v", VIDEO_CODEC]
+    if "nvenc" in VIDEO_CODEC.lower():
+        # NVENC uses -cq for quality instead of -crf, and supports different preset names
+        preset = VIDEO_PRESET
+        # Normalize preset for NVENC (e.g. p1 to p7, or default p4)
+        if preset in ["ultrafast", "superfast", "veryfast"]:
+            preset = "p1"
+        elif preset == "faster":
+            preset = "p2"
+        elif preset == "fast":
+            preset = "p3"
+        elif preset == "medium":
+            preset = "p4"
+        elif preset == "slow":
+            preset = "p5"
+        elif preset == "slower":
+            preset = "p6"
+        elif preset == "veryslow":
+            preset = "p7"
+        
+        params.extend([
+            "-preset", preset,
+            "-rc", "vbr",
+            "-cq", str(VIDEO_CRF)
+        ])
+    else:
+        params.extend([
+            "-preset", VIDEO_PRESET,
+            "-crf", str(VIDEO_CRF)
+        ])
+    return params
+
 
 # AAC audio
 AUDIO_CODEC = "aac"
@@ -354,9 +393,7 @@ async def _build_ken_burns_clip(
         "-map", "1:a",
         "-t", f"{duration:.3f}",
         # ── Encoding ───────────────────────────────────────────────
-        "-c:v", VIDEO_CODEC,
-        "-preset", VIDEO_PRESET,
-        "-crf", str(VIDEO_CRF),
+        *(_get_video_encoding_params()),
         "-bufsize", VIDEO_BUFSIZE,  # Limit encoder buffer
         "-maxrate", "3000k",         # Limit bitrate spikes
         "-c:a", AUDIO_CODEC,
@@ -469,9 +506,7 @@ async def _concat_with_xfade_direct(
         "-map", "[vout]",
         "-map", "[aout]",
         # ── encoding ────────────────────────────────────────────────
-        "-c:v", VIDEO_CODEC,
-        "-preset", VIDEO_PRESET,
-        "-crf", str(VIDEO_CRF),
+        *(_get_video_encoding_params()),
         "-bufsize", VIDEO_BUFSIZE,
         "-maxrate", "3000k",
         "-c:a", AUDIO_CODEC,
@@ -592,9 +627,7 @@ async def _burn_subtitles(
         "-threads", FFMPEG_THREADS,
         "-i", str(video_path),
         "-vf", vf,
-        "-c:v", VIDEO_CODEC,
-        "-preset", VIDEO_PRESET,
-        "-crf", str(VIDEO_CRF),
+        *(_get_video_encoding_params()),
         "-bufsize", VIDEO_BUFSIZE,
         "-maxrate", "3000k",
         "-c:a", "copy",
@@ -734,6 +767,11 @@ async def _run_ffmpeg(cmd: list[str], timeout_secs: int = 300) -> None:
     logger.debug("Running FFmpeg (timeout=%ds): %s", timeout_secs, " ".join(cmd[:8]) + " ...")
 
     try:
+        # Lower CPU priority on Windows to allow foreground task stability
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+
         with open(stderr_log_path, "w", encoding="utf-8", errors="replace") as f_err:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -741,6 +779,7 @@ async def _run_ffmpeg(cmd: list[str], timeout_secs: int = 300) -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=f_err,
                 timeout=timeout_secs,
+                creationflags=creationflags,
             )
 
         stderr_text = ""
