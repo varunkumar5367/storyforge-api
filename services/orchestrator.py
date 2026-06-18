@@ -85,6 +85,84 @@ from utils.file_handler import (
 
 logger = logging.getLogger("storyforge.orchestrator")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Story Configuration Parser
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps visual style labels (from frontend) to art style prompt suffixes
+_VISUAL_STYLE_PROMPTS: dict[str, str] = {
+    "cinematic": "dramatic studio lighting, photorealistic movie feel, volumetric haze, cinematic atmosphere, highly detailed",
+    "anime / manga": "hand-drawn cell-shaded illustration art style, vibrant colors, detailed anime background, anime aesthetic, manga art",
+    "anime": "hand-drawn cell-shaded illustration art style, vibrant colors, detailed anime background, anime aesthetic, manga art",
+    "cyberpunk": "neon lighting, high-tech dark futuristic ambiance, glowing reflections, synthwave aesthetic, rainy night, cyberpunk",
+    "watercolor": "soft pastel wash, organic textured artistic look, flowing pigments, elegant watercolor bleed, hand-painted",
+    "pixel art": "retro 8-bit / 16-bit video game aesthetic, pixelated texture, vibrant colors, pixel art scene",
+    "pixel": "retro 8-bit / 16-bit video game aesthetic, pixelated texture, vibrant colors, pixel art scene",
+    "3d pixar": "volumetric studio lighting, stylized clay modeling, 3D render style, cute cartoon characters, smooth shaders, Pixar style",
+    "pixar": "volumetric studio lighting, stylized clay modeling, 3D render style, cute cartoon characters, smooth shaders, Pixar style",
+}
+
+# Maps aspect ratio strings to (width, height) tuples
+_ASPECT_RATIO_DIMS: dict[str, tuple[int, int]] = {
+    "16:9": (1280, 720),
+    "9:16": (720, 1280),
+    "1:1": (1080, 1080),
+}
+
+_DEFAULT_ART_STYLE = "dramatic studio lighting, photorealistic movie feel, cinematic atmosphere, highly detailed"
+
+
+def _parse_story_config(story_text: str) -> tuple[int, int, str]:
+    """
+    Parse the optional [STORY CONFIGURATION ...] block at the top of story_text.
+
+    Returns:
+        (width, height, art_style_suffix)
+    """
+    import re
+
+    width, height = 1280, 720  # default 16:9
+    art_style = _DEFAULT_ART_STYLE
+
+    # Match the config block
+    config_match = re.search(
+        r"\[STORY CONFIGURATION[^\]]*?\]\s*",
+        story_text,
+        re.DOTALL,
+    )
+    if not config_match:
+        return width, height, art_style
+
+    config_block = config_match.group(0)
+
+    # Extract Aspect Ratio
+    ratio_match = re.search(r'Aspect Ratio:\s*"([^"]+)"', config_block)
+    if ratio_match:
+        ratio_str = ratio_match.group(1).strip()
+        # Could be "Vertical 9:16", "Landscape 16:9", "Square 1:1", or just "9:16"
+        for key, dims in _ASPECT_RATIO_DIMS.items():
+            if key in ratio_str:
+                width, height = dims
+                break
+
+    # Extract Visual Style
+    style_match = re.search(r'Visual Style:\s*"([^"]+)"', config_block)
+    if style_match:
+        style_str = style_match.group(1).strip().lower()
+        for key, prompt in _VISUAL_STYLE_PROMPTS.items():
+            if key in style_str:
+                art_style = prompt
+                break
+
+    logger.info(
+        "Story config parsed | aspect_ratio=%dx%d | art_style_chars=%d",
+        width,
+        height,
+        len(art_style),
+    )
+    return width, height, art_style
+
+
 # Global semaphore to restrict pipeline concurrency to 1 job at a time
 concurrency_semaphore = asyncio.Semaphore(1)
 
@@ -229,6 +307,8 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         # ── Transition to "queued" / "starting" ───────────────────────────────
         await _set_status(job_id, "analyzing", 0,
                           log="Starting pipeline …")
+
+        output_width, output_height, art_style_suffix = _parse_story_config(story_text)
 
         # ══════════════════════════════════════════════════════════════════════
         # Step 1 — Story Analysis  (0 % → 15 %)
@@ -385,7 +465,9 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
 
                 start_step("generating_images")
                 updated_scene = await generate_image_for_scene(
-                    job_id, raw_scene, character_memory
+                    job_id, raw_scene, character_memory,
+                    width=output_width, height=output_height,
+                    art_style_suffix=art_style_suffix,
                 )
                 end_step("generating_images")
                 image_ok = updated_scene.get("image_path") is not None
@@ -504,7 +586,7 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                           log="Step 5/7 — Composing episode.mp4 with FFmpeg …")
 
         start_step("composing_video")
-        result = await compose_video(job_id, scenes)
+        result = await compose_video(job_id, scenes, width=output_width, height=output_height)
         end_step("composing_video")
 
         if not result["success"]:

@@ -126,6 +126,10 @@ async def generate_image_for_scene(
     scene: dict[str, Any],
     character_memory: dict[str, Any],
     client: httpx.AsyncClient | None = None,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
+    art_style_suffix: str = ART_STYLE,
 ) -> dict[str, Any]:
     """
     Generate an image for a single scene and return the updated scene dict.
@@ -142,11 +146,13 @@ async def generate_image_for_scene(
             follow_redirects=True,
         ) as owned_client:
             result = await _generate_scene_image(
-                owned_client, job_id, scene_obj, char_mem
+                owned_client, job_id, scene_obj, char_mem,
+                width=width, height=height, art_style_suffix=art_style_suffix,
             )
     else:
         result = await _generate_scene_image(
-            client, job_id, scene_obj, char_mem
+            client, job_id, scene_obj, char_mem,
+            width=width, height=height, art_style_suffix=art_style_suffix,
         )
 
     if result.success and result.path:
@@ -253,9 +259,13 @@ async def _generate_scene_image(
     job_id: str,
     scene: Scene,
     char_mem: CharacterMemory,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
+    art_style_suffix: str = ART_STYLE,
 ) -> _ImageResult:
     """Build the prompt, download via provider chain, and save to disk."""
-    prompt = _build_scene_prompt(scene, char_mem)
+    prompt = _build_scene_prompt(scene, char_mem, art_style_suffix=art_style_suffix)
     seed = _scene_seed(scene, char_mem)
 
     logger.info(
@@ -267,7 +277,7 @@ async def _generate_scene_image(
     logger.debug("Scene %03d full prompt:\n%s", scene.scene_number, prompt)
 
     image_bytes, provider, download_error = await _download_with_retry(
-        client, prompt, seed, scene.scene_number
+        client, prompt, seed, scene.scene_number, width=width, height=height
     )
 
     if download_error:
@@ -318,7 +328,7 @@ async def _generate_scene_image(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _build_scene_prompt(scene: Scene, char_mem: CharacterMemory) -> str:
+def _build_scene_prompt(scene: Scene, char_mem: CharacterMemory, *, art_style_suffix: str = ART_STYLE) -> str:
     """Assemble a layered image-generation prompt for one scene."""
     parts: list[str] = []
 
@@ -329,10 +339,7 @@ def _build_scene_prompt(scene: Scene, char_mem: CharacterMemory) -> str:
     if char_block:
         parts.append(char_block)
 
-    # Note: key_objects and setting are already represented in scene.image_prompt 
-    # to avoid prompt bloat and redundancy for Gemini/Flux models.
-
-    parts.append(ART_STYLE)
+    parts.append(art_style_suffix)
 
     positive = ", ".join(filter(None, parts))
     full_prompt = f"{positive} | {NEGATIVE_TOKENS}"
@@ -419,6 +426,9 @@ async def _download_with_retry(
     prompt: str,
     seed: int,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None, str | None]:
     """
     Try providers in priority order with exponential back-off between attempts.
@@ -442,7 +452,7 @@ async def _download_with_retry(
             await asyncio.sleep(wait)
 
         image_bytes, provider, error = await _try_all_providers(
-            client, prompt, seed, scene_number
+            client, prompt, seed, scene_number, width=width, height=height
         )
 
         if error is None and image_bytes:
@@ -466,6 +476,9 @@ async def _try_all_providers(
     prompt: str,
     seed: int,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None, str | None]:
     """
     Provider chain: Gemini → Hugging Face Paid → Pollinations → Stable Horde → HF Free → PIL Placeholder.
@@ -473,40 +486,40 @@ async def _try_all_providers(
     Returns (bytes, provider, error) where error is None on success.
     """
     # 1. Gemini
-    gemini_bytes, gemini_err = await _download_gemini(prompt, scene_number)
+    gemini_bytes, gemini_err = await _download_gemini(prompt, scene_number, width=width, height=height)
     if gemini_err is None and gemini_bytes:
         return gemini_bytes, "gemini", None
     logger.warning("Scene %03d | provider=gemini failed: %s", scene_number, gemini_err)
 
     # 2. Hugging Face Paid
-    hf_bytes, hf_err = await _download_huggingface(client, prompt, scene_number)
+    hf_bytes, hf_err = await _download_huggingface(client, prompt, scene_number, width=width, height=height)
     if hf_err is None and hf_bytes:
         return hf_bytes, "huggingface", None
     logger.warning("Scene %03d | provider=huggingface failed: %s", scene_number, hf_err)
 
     # 3. Pollinations
-    poll_bytes, poll_err = await _download_pollinations(client, prompt, seed, scene_number)
+    poll_bytes, poll_err = await _download_pollinations(client, prompt, seed, scene_number, width=width, height=height)
     if poll_err is None and poll_bytes:
         return poll_bytes, "pollinations", None
     logger.warning("Scene %03d | provider=pollinations failed: %s", scene_number, poll_err)
 
     # 4. Stable Horde
     logger.warning("Scene %03d | Trying Stable Horde...", scene_number)
-    sh_bytes, sh_err = await _download_stable_horde(prompt, scene_number)
+    sh_bytes, sh_err = await _download_stable_horde(prompt, scene_number, width=width, height=height)
     if sh_err is None and sh_bytes:
         return sh_bytes, "stablehorde", None
     logger.warning("Scene %03d | provider=stablehorde failed: %s", scene_number, sh_err)
 
     # 5. Hugging Face Free
     logger.warning("Scene %03d | Trying Hugging Face free inference...", scene_number)
-    hff_bytes, hff_err = await _download_hf_free(prompt, scene_number)
+    hff_bytes, hff_err = await _download_hf_free(prompt, scene_number, width=width, height=height)
     if hff_err is None and hff_bytes:
         return hff_bytes, "hf_free", None
     logger.warning("Scene %03d | provider=hf_free failed: %s", scene_number, hff_err)
 
     # 6. PIL Placeholder (never fails)
     logger.warning("Scene %03d | All image APIs failed — generating PIL placeholder.", scene_number)
-    placeholder_bytes = _make_placeholder_image(scene_number, prompt)
+    placeholder_bytes = _make_placeholder_image(scene_number, prompt, width=width, height=height)
     return placeholder_bytes, "placeholder", None
 
 
@@ -534,6 +547,9 @@ async def _gemini_rate_limit_wait() -> None:
 async def _download_gemini(
     prompt: str,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None]:
     """Generate an image via the Google Generative AI SDK."""
     api_key = settings.gemini_api_key
@@ -552,10 +568,10 @@ async def _download_gemini(
 
     try:
         image_bytes = await asyncio.to_thread(
-            _gemini_generate_sync, api_key, prompt, scene_number
+            _gemini_generate_sync, api_key, prompt, scene_number, width=width, height=height
         )
         if image_bytes:
-            return _resize_to_16x9(image_bytes), None
+            return _resize_to_target(image_bytes, width=width, height=height), None
         return b"", "Gemini returned no image data"
     except ImportError:
         logger.warning(
@@ -573,6 +589,9 @@ def _gemini_generate_sync(
     api_key: str,
     prompt: str,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> bytes:
     """Synchronous Gemini image generation (runs in a thread pool)."""
     import google.generativeai as genai
@@ -581,7 +600,7 @@ def _gemini_generate_sync(
     model = genai.GenerativeModel(GEMINI_MODEL)
 
     generation_prompt = (
-        f"Generate a cinematic {IMAGE_WIDTH}x{IMAGE_HEIGHT} (16:9) image: {prompt}"
+        f"Generate a {width}x{height} image: {prompt}"
     )
 
     try:
@@ -622,6 +641,9 @@ async def _download_huggingface(
     client: httpx.AsyncClient,
     prompt: str,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None]:
     """POST to Hugging Face FLUX.1-schnell inference API."""
     api_key = settings.huggingface_api_key
@@ -631,7 +653,7 @@ async def _download_huggingface(
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = {
         "inputs": prompt,
-        "parameters": {"width": IMAGE_WIDTH, "height": IMAGE_HEIGHT},
+        "parameters": {"width": width, "height": height},
     }
 
     try:
@@ -667,7 +689,8 @@ async def _download_huggingface(
         scene_number,
         len(response.content),
     )
-    return response.content, None
+    img_bytes = _resize_to_target(response.content, width=width, height=height)
+    return img_bytes, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,6 +733,9 @@ async def _download_pollinations(
     prompt: str,
     seed: int,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None]:
     """GET image from Pollinations.ai (uses API key if available, otherwise rotates public endpoints)."""
     api_key = settings.pollinations_api_key
@@ -719,15 +745,15 @@ async def _download_pollinations(
         url = f"{POLLINATIONS_BASE}/{encoded_prompt}"
         params = {
             "seed": seed,
-            "width": IMAGE_WIDTH,
-            "height": IMAGE_HEIGHT,
+            "width": width,
+            "height": height,
             "model": "flux",
         }
         headers = {"Authorization": f"Bearer {api_key}"}
         try:
             response = await client.get(url, params=params, headers=headers)
             if response.status_code == 200 and response.content:
-                img_bytes = _resize_to_16x9(response.content)
+                img_bytes = _resize_to_target(response.content, width=width, height=height)
                 return img_bytes, None
             logger.warning("Scene %03d | Authenticated Pollinations returned status %d", scene_number, response.status_code)
         except Exception as exc:
@@ -740,7 +766,7 @@ async def _download_pollinations(
     encoded_short = urllib.parse.quote(prompt[:250])
 
     rand_seed = random.randint(1, 999_999)
-    dims = f"width={IMAGE_WIDTH}&height={IMAGE_HEIGHT}&seed={rand_seed}"
+    dims = f"width={width}&height={height}&seed={rand_seed}"
 
     url_candidates = [
         # Tier 1: full resolution, model variants
@@ -781,7 +807,7 @@ async def _download_pollinations(
                 last_error = "empty body"
                 continue
 
-            img_bytes = _resize_to_16x9(response.content)
+            img_bytes = _resize_to_target(response.content, width=width, height=height)
             return img_bytes, None
         except Exception as exc:
             last_error = str(exc)
@@ -798,6 +824,9 @@ async def _download_pollinations(
 async def _download_stable_horde(
     prompt: str,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None]:
     """Generate an image via Stable Horde (stablehorde.net).
     Uses anonymous key '0000000000', with 1024x576 dimensions.
@@ -816,8 +845,8 @@ async def _download_stable_horde(
                 json={
                     "prompt": prompt[:500],
                     "params": {
-                        "width": 576,
-                        "height": 320,
+                        "width": width,
+                        "height": height,
                         "steps": 20,
                         "sampler_name": "k_euler",
                         "cfg_scale": 7.5,
@@ -875,7 +904,7 @@ async def _download_stable_horde(
                 # The image is returned as a URL. Download it.
                 img_resp = await client.get(img_url)
                 img_resp.raise_for_status()
-                img_bytes = _resize_to_16x9(img_resp.content)
+                img_bytes = _resize_to_target(img_resp.content, width=width, height=height)
                 return img_bytes, None
             except Exception as exc:
                 return b"", f"Stable Horde image download/resize failed: {exc}"
@@ -898,6 +927,9 @@ _HF_FREE_MODELS = [
 async def _download_hf_free(
     prompt: str,
     scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None]:
     """Try HuggingFace's free serverless inference API."""
     api_key = settings.huggingface_api_key
@@ -919,7 +951,7 @@ async def _download_hf_free(
                     continue
                 if not response.content:
                     continue
-                img_bytes = _resize_to_16x9(response.content)
+                img_bytes = _resize_to_target(response.content, width=width, height=height)
                 return img_bytes, None
             except Exception as exc:
                 logger.warning("Scene %03d | HF-free %s error: %s", scene_number, model, exc)
@@ -932,11 +964,11 @@ async def _download_hf_free(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _make_placeholder_image(scene_number: int, prompt: str) -> bytes:
+def _make_placeholder_image(scene_number: int, prompt: str, *, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT) -> bytes:
     """Generate a dark cinematic placeholder PNG using Pillow when all image APIs fail."""
     from PIL import Image, ImageDraw, ImageFont
 
-    w, h = IMAGE_WIDTH, IMAGE_HEIGHT
+    w, h = width, height
     img = Image.new("RGB", (w, h), color=(10, 8, 20))
     draw = ImageDraw.Draw(img)
 
@@ -983,13 +1015,12 @@ def _make_placeholder_image(scene_number: int, prompt: str) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _resize_to_16x9(img_bytes: bytes) -> bytes:
-    """Resize any image to IMAGE_WIDTH × IMAGE_HEIGHT (1280×720) via Pillow."""
+def _resize_to_target(img_bytes: bytes, *, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT) -> bytes:
+    """Resize any image to the target dimensions via Pillow."""
     from PIL import Image
 
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    img = img.resize((IMAGE_WIDTH, IMAGE_HEIGHT), Image.LANCZOS)
+    img = img.resize((width, height), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
-

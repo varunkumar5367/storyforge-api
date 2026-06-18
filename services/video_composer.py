@@ -185,6 +185,9 @@ class FFmpegError(RuntimeError):
 async def compose_video(
     job_id: str,
     scenes: list[dict[str, Any]],
+    *,
+    width: int = OUTPUT_WIDTH,
+    height: int = OUTPUT_HEIGHT,
 ) -> dict[str, Any]:
     """
     Assemble episode.mp4 from scenes using sequential, memory-efficient processing
@@ -248,7 +251,7 @@ async def compose_video(
                 Path(scene.image_path).name,
             )
 
-            await _build_ken_burns_clip(scene, duration, clip_path)
+            await _build_ken_burns_clip(scene, duration, clip_path, width=width, height=height)
             clip_infos.append(_ClipInfo(
                 scene_number=scene.scene_number,
                 path=clip_path,
@@ -325,6 +328,9 @@ async def _build_ken_burns_clip(
     scene: Scene,
     duration: float,
     out_path: Path,
+    *,
+    width: int = OUTPUT_WIDTH,
+    height: int = OUTPUT_HEIGHT,
 ) -> None:
     """
     Build one scene clip with Ken Burns zoom-in effect.
@@ -366,13 +372,13 @@ async def _build_ken_burns_clip(
 
     filter_complex = (
         f"[0:v]"
-        f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},"
+        f"scale={width}:{height},"
         f"zoompan="
         f"z='{zoom_expr}':"
         f"x='{x_expr}':"
         f"y='{y_expr}':"
         f"d={frames}:"
-        f"s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}:"
+        f"s={width}x{height}:"
         f"fps={OUTPUT_FPS}"
         f"[v]"
     )
