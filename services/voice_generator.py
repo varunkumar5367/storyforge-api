@@ -260,6 +260,15 @@ async def generate_voice_for_scene(
     and provide a shared ``httpx.AsyncClient``.
     """
     scene_obj = Scene(**scene)
+
+    out_path = scene_audio_path(job_id, scene_obj.scene_number)
+    if out_path.exists() and out_path.stat().st_size > 0:
+        logger.info("Scene %03d | Audio file already exists on disk, skipping generation: %s", scene_obj.scene_number, out_path)
+        scene_obj.audio_path = str(out_path)
+        if not scene_obj.duration_hint:
+            scene_obj.duration_hint = round(out_path.stat().st_size / _BYTES_PER_SECOND_MP3_128K, 2)
+        return scene_obj.model_dump()
+
     result = await _generate_scene_audio(
         client, job_id, scene_obj, voice, speed, pitch
     )

@@ -223,6 +223,30 @@ async def generate_subtitles(
     }
 
 
+def _parse_srt_to_cues(srt_content: str) -> list[_Cue]:
+    import re
+    cues = []
+    blocks = srt_content.strip().split("\n\n")
+    for block in blocks:
+        lines = block.strip().split("\n")
+        if len(lines) >= 3:
+            try:
+                idx = int(lines[0].strip())
+                time_match = re.match(
+                    r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})",
+                    lines[1].strip()
+                )
+                if time_match:
+                    g = time_match.groups()
+                    start = int(g[0])*3600 + int(g[1])*60 + int(g[2]) + int(g[3])/1000.0
+                    end = int(g[4])*3600 + int(g[5])*60 + int(g[6]) + int(g[7])/1000.0
+                    text = "\n".join(lines[2:])
+                    cues.append(_Cue(index=idx, start=start, end=end, text=text))
+            except Exception:
+                continue
+    return cues
+
+
 async def generate_subtitle_for_scene(
     job_id: str,
     scene: dict[str, Any],
@@ -235,6 +259,26 @@ async def generate_subtitle_for_scene(
         subtitle_result is None when transcription failed entirely.
     """
     scene_obj = Scene(**scene)
+
+    out_path = scene_subtitle_path(job_id, scene_obj.scene_number)
+    if out_path.exists() and out_path.stat().st_size > 0:
+        logger.info("Scene %03d | Subtitle file already exists on disk, skipping transcription: %s", scene_obj.scene_number, out_path)
+        scene_obj.subtitle_path = str(out_path)
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            cues = _parse_srt_to_cues(content)
+            res = _SceneSubtitleResult(
+                scene_number=scene_obj.scene_number,
+                success=True,
+                cues=cues,
+                path=str(out_path),
+                audio_duration=scene_obj.duration_hint or 0.0,
+            )
+            return scene_obj.model_dump(), res
+        except Exception as e:
+            logger.warning("Failed to parse existing SRT for scene %03d: %s. Regenerating.", scene_obj.scene_number, e)
+
     result = await _transcribe_scene(job_id, scene_obj)
 
     if result.success and result.path:

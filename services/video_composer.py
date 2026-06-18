@@ -335,6 +335,10 @@ async def _build_ken_burns_clip(
     """
     Build one scene clip with Ken Burns zoom-in effect.
     """
+    if out_path.exists() and out_path.stat().st_size > 0:
+        logger.info("Clip file already exists on disk, skipping creation: %s", out_path)
+        return
+
     frames = max(1, int(duration * OUTPUT_FPS))
 
     camera_instr = getattr(scene, "camera", "slow_zoom_in") or "slow_zoom_in"
@@ -524,7 +528,9 @@ async def _concat_with_xfade_direct(
     logger.debug("Direct concat cmd: %s", _redacted_cmd(cmd))
 
     try:
-        await _run_ffmpeg(cmd, timeout_secs=FFMPEG_TIMEOUT_SECS)
+        total_duration = sum(c.duration for c in clips)
+        dynamic_timeout = min(3600, max(300, int(total_duration * 15)))
+        await _run_ffmpeg(cmd, timeout_secs=dynamic_timeout)
     finally:
         if filter_script_path.exists():
             try:
@@ -555,7 +561,7 @@ async def _concat_with_xfade(
 
     if n == 1:
         if burn_subtitles_path and burn_subtitles_path.exists():
-            await _burn_subtitles(clips[0].path, burn_subtitles_path, out_path)
+            await _burn_subtitles(clips[0].path, burn_subtitles_path, out_path, duration_secs=clips[0].duration)
         else:
             shutil.copy2(clips[0].path, out_path)
         return
@@ -609,6 +615,7 @@ async def _burn_subtitles(
     video_path: Path,
     srt_path: Path,
     out_path: Path,
+    duration_secs: float = 300.0,
 ) -> None:
     """
     Burn episode.srt into the video using FFmpeg's libass subtitles filter.
@@ -643,7 +650,8 @@ async def _burn_subtitles(
     ]
 
     logger.debug("Subtitle burn cmd: %s", _redacted_cmd(cmd))
-    await _run_ffmpeg(cmd, timeout_secs=FFMPEG_TIMEOUT_SECS)
+    dynamic_timeout = min(3600, max(300, int(duration_secs * 10)))
+    await _run_ffmpeg(cmd, timeout_secs=dynamic_timeout)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

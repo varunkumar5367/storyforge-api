@@ -356,20 +356,36 @@ async def pause_job(job_id: str, current_user: dict = Depends(get_current_user))
     return {"success": True, "message": "Job paused."}
 
 
-@router.post("/resume/{job_id}", summary="Resume a paused job")
+@router.post("/resume/{job_id}", summary="Resume a paused or failed job")
 async def resume_job(job_id: str, current_user: dict = Depends(get_current_user)):
     job = await get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-    if job.get("status") != "paused":
-        raise HTTPException(status_code=400, detail="Job is not paused.")
+    
+    status = job.get("status")
+    if status not in ("paused", "failed"):
+        raise HTTPException(status_code=400, detail="Job is not paused or failed.")
+        
     if current_user.get("role") != "admin" and job.get("user_id") != current_user["id"]:
         raise HTTPException(status_code=403, detail="Access denied. You do not own this job.")
     
-    from services.orchestrator import _append_log
-    await update_job(job_id, status="generating_images", current_step="generating_images")
-    await _append_log(job_id, "Generation RESUMED by user request.")
-    return {"success": True, "message": "Job resumed."}
+    from services.orchestrator import _append_log, start_pipeline
+    
+    if status == "failed":
+        await update_job(
+            job_id,
+            status="queued",
+            current_step="queued",
+            progress_percent=0,
+            error_message=None
+        )
+        await _append_log(job_id, "Generation RETRIED / RESUMED by user request.")
+        start_pipeline(job_id, job.get("story_text") or "")
+        return {"success": True, "message": "Job restarted successfully."}
+    else:
+        await update_job(job_id, status="generating_images", current_step="generating_images")
+        await _append_log(job_id, "Generation RESUMED by user request.")
+        return {"success": True, "message": "Job resumed."}
 
 
 from pydantic import BaseModel

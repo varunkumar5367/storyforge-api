@@ -140,6 +140,13 @@ async def generate_image_for_scene(
     char_mem = CharacterMemory(**character_memory)
     scene_obj = Scene(**scene)
 
+    out_path = scene_image_path(job_id, scene_obj.scene_number)
+    if out_path.exists() and out_path.stat().st_size > 0:
+        logger.info("Scene %03d | Image file already exists on disk, skipping generation: %s", scene_obj.scene_number, out_path)
+        scene_obj.image_path = str(out_path)
+        scene_obj.image_provider = "cached"
+        return scene_obj.model_dump()
+
     if client is None:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(REQUEST_TIMEOUT),
