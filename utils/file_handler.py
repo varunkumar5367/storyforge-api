@@ -161,30 +161,104 @@ def delete_job_dir(job_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cloudinary Upload Helper
+# Supabase Storage & Cloudinary Upload Helpers
 # ---------------------------------------------------------------------------
-async def upload_asset(file_path: Path, resource_type: str = "auto") -> str | None:
-    """Uploads a file to Cloudinary if CLOUDINARY_URL is configured, returning its secure CDN URL."""
-    if not settings.cloudinary_url or not file_path.exists():
+async def upload_to_supabase(file_path: Path, bucket: str, path_in_bucket: str) -> str | None:
+    """Uploads a file to Supabase Storage and returns its public CDN URL."""
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    if not supabase_url or not supabase_key or not file_path.exists():
         return None
 
-    def _sync_upload():
+    import mimetypes
+    import httpx
+
+    # Normalise URL
+    supabase_url = supabase_url.rstrip("/")
+    url = f"{supabase_url}/storage/v1/object/{bucket}/{path_in_bucket}"
+
+    try:
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": mime_type,
+            "x-upsert": "true"
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, content=file_bytes, headers=headers, timeout=60.0)
+            if response.status_code == 200:
+                public_url = f"{supabase_url}/storage/v1/object/public/{bucket}/{path_in_bucket}"
+                logger.info("Successfully uploaded %s to Supabase Storage: %s", file_path.name, public_url)
+                return public_url
+            else:
+                logger.error("Supabase Storage upload failed for %s: %d - %s", file_path, response.status_code, response.text)
+                return None
+    except Exception as e:
+        logger.error("Supabase Storage upload exception for %s: %s", file_path, e)
+        return None
+
+
+async def upload_asset(file_path: Path, resource_type: str = "auto") -> str | None:
+    """
+    Uploads a file to a cloud storage provider and returns its public CDN URL.
+    Checks providers in this priority order:
+    1. Supabase Storage (if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY/KEY are configured)
+    2. Cloudinary (if CLOUDINARY_URL is configured)
+    """
+    if not file_path.exists():
+        return None
+
+    # 1. Try Supabase Storage first
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    if supabase_url and supabase_key:
+        bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "storyforge")
         try:
-            import cloudinary
-            import cloudinary.uploader
+            rel_path = file_path.relative_to(OUTPUT_DIR)
+            path_parts = rel_path.parts
+            if len(path_parts) >= 2:
+                job_id = path_parts[0]
+                path_in_bucket = f"jobs/{job_id}/" + "/".join(path_parts[1:])
+            else:
+                path_in_bucket = f"misc/{file_path.name}"
+        except Exception:
+            path_in_bucket = f"misc/{file_path.name}"
 
-            os.environ.setdefault("CLOUDINARY_URL", settings.cloudinary_url or "")
-            response = cloudinary.uploader.upload(
-                str(file_path),
-                resource_type=resource_type,
-                folder="storyforge",
-            )
-            url = response.get("secure_url")
-            logger.info("Successfully uploaded %s to Cloudinary: %s", file_path.name, url)
+        url = await upload_to_supabase(file_path, bucket, path_in_bucket)
+        if url:
             return url
-        except Exception as e:
-            logger.error("Cloudinary upload failed for %s: %s", file_path, e)
-            return None
 
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _sync_upload)
+    # 2. Try Cloudinary next
+    if settings.cloudinary_url:
+        def _sync_upload():
+            try:
+                import cloudinary
+                import cloudinary.uploader
+
+                os.environ.setdefault("CLOUDINARY_URL", settings.cloudinary_url or "")
+                response = cloudinary.uploader.upload(
+                    str(file_path),
+                    resource_type=resource_type,
+                    folder="storyforge",
+                )
+                url = response.get("secure_url")
+                logger.info("Successfully uploaded %s to Cloudinary: %s", file_path.name, url)
+                return url
+            except Exception as e:
+                logger.error("Cloudinary upload failed for %s: %s", file_path, e)
+                return None
+
+        loop = asyncio.get_running_loop()
+        url = await loop.run_in_executor(None, _sync_upload)
+        if url:
+            return url
+
+    return None
+

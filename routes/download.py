@@ -94,33 +94,47 @@ async def get_download_links(job_id: str, current_user: dict = Depends(get_curre
             ),
         )
 
-    def _url_if_exists(path: Path, *rel_parts: str) -> str | None:
+    import json
+    db_urls = {}
+    if job.get("download_urls"):
+        try:
+            if isinstance(job["download_urls"], str):
+                db_urls = json.loads(job["download_urls"])
+            elif isinstance(job["download_urls"], dict):
+                db_urls = job["download_urls"]
+        except Exception as e:
+            logger.error("Failed to parse download_urls from job %s: %s", job_id, e)
+
+    def _get_url(key: str, path: Path, *rel_parts: str) -> str | None:
+        if key in db_urls and db_urls[key]:
+            return db_urls[key]
         return output_url(job_id, *rel_parts) if path.exists() else None
 
     return JobOutputLinks(
         job_id=job_id,
-        episode_mp4=_url_if_exists(
-            final_video_path(job_id), "final", "episode.mp4"
+        episode_mp4=_get_url(
+            "video", final_video_path(job_id), "final", "episode.mp4"
         ),
-        thumbnail_png=_url_if_exists(
-            final_thumbnail_path(job_id), "final", "thumbnail.png"
+        thumbnail_png=_get_url(
+            "thumbnail", final_thumbnail_path(job_id), "final", "thumbnail.png"
         ),
-        character_bible_md=_url_if_exists(
-            final_character_bible_path(job_id), "final", "character_bible.md"
+        character_bible_md=_get_url(
+            "character_bible", final_character_bible_path(job_id), "final", "character_bible.md"
         ),
-        title_txt=_url_if_exists(
-            final_title_path(job_id), "final", "title.txt"
+        title_txt=_get_url(
+            "title", final_title_path(job_id), "final", "title.txt"
         ),
-        description_txt=_url_if_exists(
-            final_description_path(job_id), "final", "description.txt"
+        description_txt=_get_url(
+            "description", final_description_path(job_id), "final", "description.txt"
         ),
-        hashtags_txt=_url_if_exists(
-            final_hashtags_path(job_id), "final", "hashtags.txt"
+        hashtags_txt=_get_url(
+            "hashtags", final_hashtags_path(job_id), "final", "hashtags.txt"
         ),
-        subtitles_srt=_url_if_exists(
-            master_srt_path(job_id), "subtitles", "episode.srt"
+        subtitles_srt=_get_url(
+            "subtitles", master_srt_path(job_id), "subtitles", "episode.srt"
         ),
-        thumbnail_prompt_txt=_url_if_exists(
-            final_title_path(job_id).with_name("thumbnail_prompt.txt"), "final", "thumbnail_prompt.txt"
+        thumbnail_prompt_txt=_get_url(
+            "thumbnail_prompt", final_title_path(job_id).with_name("thumbnail_prompt.txt"), "final", "thumbnail_prompt.txt"
         ),
     )
+
