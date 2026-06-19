@@ -186,6 +186,7 @@ async def upload_to_supabase(file_path: Path, bucket: str, path_in_bucket: str) 
             mime_type = "application/octet-stream"
 
         headers = {
+            "apikey": supabase_key,
             "Authorization": f"Bearer {supabase_key}",
             "Content-Type": mime_type,
             "x-upsert": "true"
