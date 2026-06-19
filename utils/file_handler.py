@@ -175,6 +175,12 @@ async def upload_to_supabase(file_path: Path, bucket: str, path_in_bucket: str) 
 
     # Normalise URL
     supabase_url = supabase_url.rstrip("/")
+    if supabase_url.endswith("/rest/v1"):
+        supabase_url = supabase_url[:-8]
+    elif supabase_url.endswith("/rest/v1/"):
+        supabase_url = supabase_url[:-9]
+    supabase_url = supabase_url.rstrip("/")
+    
     url = f"{supabase_url}/storage/v1/object/{bucket}/{path_in_bucket}"
 
     try:
