@@ -186,6 +186,17 @@ _STEPS: list[tuple[str, int, bool]] = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+async def _set_pending_approval_task(job_id: str):
+    from database import update_job
+    await update_job(
+        job_id,
+        status="pending_approval",
+        current_step="pending_approval",
+        progress_percent=0,
+    )
+    logger.info("Job %s set to pending_approval (coordinator mode).", job_id)
+
+
 def start_pipeline(job_id: str, story_text: str) -> asyncio.Task:
     """
     Launch the full pipeline as a non-blocking asyncio background task.
@@ -201,6 +212,15 @@ def start_pipeline(job_id: str, story_text: str) -> asyncio.Task:
     Returns:
         The asyncio.Task object (caller may ignore it — it is self-contained).
     """
+    import os
+    run_on_render = os.getenv("RUN_PIPELINE_ON_RENDER", "False").lower() == "true"
+    is_prod = os.getenv("ENV") == "production"
+
+    if is_prod and not run_on_render:
+        task = asyncio.create_task(_set_pending_approval_task(job_id))
+        logger.info("Coordinator mode active: job %s queued for laptop worker approval.", job_id)
+        return task
+
     task = asyncio.create_task(
         _run_pipeline(job_id, story_text),
         name=f"pipeline-{job_id}",
@@ -316,18 +336,50 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         await _set_status(job_id, "analyzing", 0,
                           log="Step 1/7 — Analysing story …")
 
-        start_step("analyzing")
-        result = await analyze_story(story_text)
-        end_step("analyzing")
+        # Check if the job already has scenes extracted (resuming a failed/paused job)
+        from database import get_job
+        existing_job = await get_job(job_id)
+        existing_scenes = None
+        existing_char_mem = None
+        if existing_job:
+            existing_scenes_raw = existing_job.get("scenes")
+            if existing_scenes_raw:
+                try:
+                    if isinstance(existing_scenes_raw, str):
+                        existing_scenes = json.loads(existing_scenes_raw)
+                    elif isinstance(existing_scenes_raw, list):
+                        existing_scenes = existing_scenes_raw
+                except Exception as e:
+                    logger.warning("Failed to parse existing scenes: %s", e)
+            
+            existing_char_mem_raw = existing_job.get("character_memory")
+            if existing_char_mem_raw:
+                try:
+                    if isinstance(existing_char_mem_raw, str):
+                        existing_char_mem = json.loads(existing_char_mem_raw)
+                    elif isinstance(existing_char_mem_raw, dict):
+                        existing_char_mem = existing_char_mem_raw
+                except Exception as e:
+                    logger.warning("Failed to parse existing character memory: %s", e)
 
-        if not result["success"]:
-            err = f"Story analysis failed: {result['error']}"
-            await _fail(job_id, err)
-            await save_analytics("failed", err)
-            return
+        if existing_scenes and len(existing_scenes) > 0:
+            logger.info("Found %d existing scenes in DB, skipping Story Analysis.", len(existing_scenes))
+            await _append_log(job_id, f"Resuming job: found {len(existing_scenes)} existing scenes, skipping Story Analysis.")
+            scenes = existing_scenes
+            character_memory = existing_char_mem or {}
+        else:
+            start_step("analyzing")
+            result = await analyze_story(story_text)
+            end_step("analyzing")
 
-        scenes = result["data"]["scenes"]
-        character_memory = result["data"]["character_memory"]
+            if not result["success"]:
+                err = f"Story analysis failed: {result['error']}"
+                await _fail(job_id, err)
+                await save_analytics("failed", err)
+                return
+
+            scenes = result["data"]["scenes"]
+            character_memory = result["data"]["character_memory"]
 
         # Limit checks for non-admin users
         from database import get_user_by_id, count_user_images_last_hour, get_job
@@ -362,15 +414,21 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         except Exception as e:
             logger.warning("Failed to save character bible: %s", e)
 
+        log_msg = f"Step 1 ✓ — {len(scenes)} scenes loaded from cache (resumption)"
+        if 'result' in locals() and result.get("success"):
+            log_msg = (
+                f"Step 1 ✓ — {len(scenes)} scenes extracted "
+                f"| mood={result['data'].get('mood', '?')} "
+                f"| locations={len(result['data'].get('locations', []))}"
+            )
+
         await _progress(
             job_id,
             status="analyzing",
             progress=15,
             scenes=scenes,
             character_memory=character_memory,
-            log=f"Step 1 ✓ — {len(scenes)} scenes extracted "
-                f"| mood={result['data'].get('mood', '?')} "
-                f"| locations={len(result['data'].get('locations', []))}",
+            log=log_msg,
         )
 
         # ══════════════════════════════════════════════════════════════════════
@@ -412,7 +470,44 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
             scene_num = idx + 1
             scene_label = f"{scene_num:03d}"
 
-            # Stagger startup to prevent hammering APIs simultaneously
+            from utils.file_handler import scene_image_path, scene_audio_path, scene_subtitle_path
+            
+            img_exists = scene_image_path(job_id, scene_num).exists()
+            audio_exists = scene_audio_path(job_id, scene_num).exists()
+            sub_exists = scene_subtitle_path(job_id, scene_num).exists()
+            
+            if img_exists and audio_exists and sub_exists:
+                # FAST PATH: All assets exist on disk, bypass stagger sleep, semaphores, and database writes
+                updated_scene = await generate_image_for_scene(
+                    job_id, raw_scene, character_memory,
+                    width=output_width, height=output_height,
+                    art_style_suffix=art_style_suffix,
+                )
+                updated_scene = await generate_voice_for_scene(
+                    voice_client, job_id, updated_scene, voice=voice
+                )
+                updated_scene, sub_result = await generate_subtitle_for_scene(
+                    job_id, updated_scene
+                )
+                scenes[idx] = updated_scene
+                
+                async with progress_lock:
+                    completed_steps += 3
+                    # Update database only every 20 scenes to avoid rate limits / congestion
+                    if (completed_steps // 3) % 20 == 0 or completed_steps == (total_scenes * 3):
+                        fraction = completed_steps / (total_scenes * 3)
+                        prog = scene_block_start + int(fraction * scene_block_size)
+                        prog = min(prog, scene_block_end)
+                        await _progress(
+                            job_id,
+                            status="generating_subtitles",
+                            progress=prog,
+                            scenes=scenes,
+                            log=f"Resumed pipeline: verified scene {scene_label}/{total_scenes} from cache."
+                        )
+                return sub_result
+
+            # SLOW PATH: At least one asset is missing, run standard stagger sleep & semaphore pipeline
             await asyncio.sleep(idx * 0.5)
 
             async with asset_semaphore:

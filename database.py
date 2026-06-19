@@ -20,6 +20,11 @@ logger = logging.getLogger("storyforge.database")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "./storyforge.db")
 
 import asyncio
+import sys
+
+if sys.platform == "win32" and (DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 try:
     import psycopg
     from psycopg.rows import dict_row

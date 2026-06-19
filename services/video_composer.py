@@ -319,6 +319,32 @@ async def compose_video(
         _cleanup(temp_files, out_path)
 
 
+async def _is_video_valid(path: Path) -> bool:
+    """Check if the video file exists and can be probed by ffprobe (not corrupt)."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path)
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            float(stdout.decode().strip())
+            return True
+    except Exception as e:
+        logger.warning("Video validation check failed for %s: %s", path, e)
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pass 1 — Ken Burns clip (single scene)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -335,9 +361,15 @@ async def _build_ken_burns_clip(
     """
     Build one scene clip with Ken Burns zoom-in effect.
     """
-    if out_path.exists() and out_path.stat().st_size > 0:
-        logger.info("Clip file already exists on disk, skipping creation: %s", out_path)
+    if await _is_video_valid(out_path):
+        logger.info("Clip file already exists on disk and is valid, skipping creation: %s", out_path)
         return
+    else:
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except OSError:
+                pass
 
     frames = max(1, int(duration * OUTPUT_FPS))
 
@@ -587,7 +619,15 @@ async def _concat_with_xfade(
             idx, depth, len(chunk), group_duration
         )
 
-        await _concat_with_xfade(chunk, group_path, burn_subtitles_path=None, temp_files=temp_files, depth=depth + 1)
+        if await _is_video_valid(group_path):
+            logger.info("Intermediate group clip already exists on disk and is valid, reusing: %s", group_path)
+        else:
+            if group_path.exists():
+                try:
+                    group_path.unlink()
+                except OSError as e:
+                    logger.warning("Could not delete corrupt intermediate group file '%s': %s", group_path, e)
+            await _concat_with_xfade(chunk, group_path, burn_subtitles_path=None, temp_files=temp_files, depth=depth + 1)
 
         grouped_clips.append(_ClipInfo(
             scene_number=idx,
@@ -597,13 +637,15 @@ async def _concat_with_xfade(
 
     await _concat_with_xfade(grouped_clips, out_path, burn_subtitles_path, temp_files=temp_files, depth=depth + 1)
 
-    # Clean up intermediate group files
-    for gc in grouped_clips:
-        try:
-            if gc.path.exists():
-                gc.path.unlink()
-        except OSError as e:
-            logger.warning("Could not delete intermediate group file '%s': %s", gc.path, e)
+    # Clean up intermediate group files only if it's NOT a resumed run (meaning we completed successfully)
+    # If this is the final final merge (depth 0), we can delete depth 1 files.
+    if depth == 0:
+        for gc in grouped_clips:
+            try:
+                if gc.path.exists():
+                    gc.path.unlink()
+            except OSError as e:
+                logger.warning("Could not delete intermediate group file '%s': %s", gc.path, e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

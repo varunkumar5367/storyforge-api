@@ -1,0 +1,11 @@
+[STORY CONFIGURATION
+Title: "Martian Horizon"
+Tone & Mood: "Sci-Fi Epic"
+Visual Style: "Anime / Manga"
+Aspect Ratio: "Vertical 9:16"
+Subtitles style: "neon"
+]
+
+Commander Vance stood on the edge of the Martian valley, his visor reflecting the crimson sunrise over the rusty plains.
+
+He picked up a strange iridescent key, and a massive blue holographic map blossomed into the dusty air.

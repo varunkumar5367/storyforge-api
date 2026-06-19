@@ -94,7 +94,7 @@ def run_async(coro):
 class WakeRequestDialog:
     def __init__(self, parent, message_text, timeout=120):
         self.dialog = tk.Toplevel(parent)
-        self.dialog.title("StoryForge - Wake Request")
+        self.dialog.title("StoryForge - Job Approval")
         self.dialog.attributes("-topmost", True)
         self.dialog.geometry("450x260")
         self.dialog.resizable(False, False)
@@ -112,25 +112,25 @@ class WakeRequestDialog:
         frame.pack(fill=tk.BOTH, expand=True)
         
         # Title
-        title_label = ttk.Label(frame, text="Incoming Wake Request", font=("Segoe UI", 16, "bold"), foreground="#8b5cf6")
+        title_label = ttk.Label(frame, text="Video Generation Request", font=("Segoe UI", 16, "bold"), foreground="#8b5cf6")
         title_label.pack(anchor=tk.W, pady=(0, 10))
         
         # Description
-        desc_text = "A visitor is requesting to start the video generation backend."
+        desc_text = "A user is requesting to render a video on your laptop."
         desc_label = ttk.Label(frame, text=desc_text, font=("Segoe UI", 10), wraplength=400)
         desc_label.pack(anchor=tk.W, pady=(0, 8))
         
         # Custom Message Box
         if message_text:
-            msg_frame = ttk.LabelFrame(frame, text="User Message", padding="8")
+            msg_frame = ttk.LabelFrame(frame, text="Details", padding="8")
             msg_frame.pack(fill=tk.X, pady=(0, 10))
             msg_label = ttk.Label(msg_frame, text=message_text, font=("Segoe UI", 9, "italic"), wraplength=380)
             msg_label.pack(anchor=tk.W)
         else:
-            ttk.Label(frame, text="No message provided.", font=("Segoe UI", 9, "italic")).pack(anchor=tk.W, pady=(0, 12))
+            ttk.Label(frame, text="No details provided.", font=("Segoe UI", 9, "italic")).pack(anchor=tk.W, pady=(0, 12))
             
         # Countdown Timer
-        self.countdown_label = ttk.Label(frame, text=f"Auto-ignoring in {self.timeout} seconds...", font=("Segoe UI", 9, "bold"), foreground="#ef4444")
+        self.countdown_label = ttk.Label(frame, text=f"Auto-declining in {self.timeout} seconds...", font=("Segoe UI", 9, "bold"), foreground="#ef4444")
         self.countdown_label.pack(anchor=tk.W, pady=(0, 15))
         
         # Buttons
@@ -139,7 +139,7 @@ class WakeRequestDialog:
         
         ignore_btn = tk.Button(
             btn_frame, 
-            text="Ignore", 
+            text="Decline", 
             command=self.on_ignore, 
             font=("Segoe UI", 10), 
             bg="#374151", 
@@ -154,7 +154,7 @@ class WakeRequestDialog:
         
         accept_btn = tk.Button(
             btn_frame, 
-            text="Accept & Start Server", 
+            text="Accept & Render", 
             command=self.on_accept, 
             font=("Segoe UI", 10, "bold"), 
             bg="#8b5cf6", 
@@ -175,7 +175,7 @@ class WakeRequestDialog:
         if self.timeout <= 0:
             self.on_ignore()
         else:
-            self.countdown_label.config(text=f"Auto-ignoring in {self.timeout} seconds...")
+            self.countdown_label.config(text=f"Auto-declining in {self.timeout} seconds...")
             self.timeout -= 1
             self.dialog.after(1000, self.update_countdown)
             
@@ -296,6 +296,9 @@ class ListenerDashboard(tk.Tk):
             pady=8
         )
         self.toggle_btn.pack(side=tk.RIGHT)
+        
+        # Start server and tunnel automatically on listener boot
+        self.start_server_bg()
         
         # Start the loops
         self.poll_requests()
@@ -448,42 +451,38 @@ class ListenerDashboard(tk.Tk):
         self.toggle_btn.config(state="normal", text="Start Server Manually", bg="#8b5cf6", activebackground="#7c3aed")
         
     def poll_requests(self):
-        """Poll database for pending wake requests."""
-        if not is_running_server:
-            # Only process wake requests if we are currently offline
-            fut = run_async(database.list_wake_requests(limit=1))
-            # Schedule check for result
-            self.after(2000, lambda: self.check_request_future(fut))
+        """Poll database for pending video generation jobs (status = 'pending_approval')."""
+        global active_jobs, max_concurrent_jobs
+        if is_running_server and active_jobs < max_concurrent_jobs:
+            fut = run_async(get_next_pending_job())
+            self.after(2000, lambda: self.check_job_future(fut))
         else:
             self.after(3000, self.poll_requests)
             
-    def check_request_future(self, fut):
+    def check_job_future(self, fut):
         if not fut.done():
-            self.after(100, lambda: self.check_request_future(fut))
+            self.after(100, lambda: self.check_job_future(fut))
             return
             
         try:
-            requests = fut.result()
-            if requests:
-                req = requests[0]
-                if req["status"] == "pending":
-                    logger.info("Found pending wake request: %s", req["id"])
-                    # Pop up wake request dialog box
-                    dialog = WakeRequestDialog(self, req["message"])
-                    result = dialog.show()
-                    
-                    if result:
-                        logger.info("Admin accepted wake request %s.", req["id"])
-                        # Mark accepted in DB
-                        run_async(database.review_wake_request(req["id"], "accepted"))
-                        # Start server
-                        self.start_server_bg()
-                    else:
-                        logger.info("Admin ignored/denied wake request %s.", req["id"])
-                        # Mark ignored in DB
-                        run_async(database.review_wake_request(req["id"], "ignored"))
+            job = fut.result()
+            if job:
+                logger.info("Found pending job approval request: %s from user %s", job["id"], job["username"])
+                filename = job.get("story_filename") or "Untitled Story"
+                word_count = len((job.get("story_text") or "").split())
+                msg = f"User '{job['username']}' requested a video for story:\n\"{filename}\" ({word_count} words)\n\nVoice: {job['voice']}"
+                
+                dialog = WakeRequestDialog(self, msg, timeout=120)
+                result = dialog.show()
+                
+                if result:
+                    logger.info("Admin accepted job request %s.", job["id"])
+                    run_async(run_pipeline_task(job["id"], job["story_text"]))
+                else:
+                    logger.info("Admin declined/ignored job request %s.", job["id"])
+                    run_async(decline_job(job["id"]))
         except Exception as e:
-            logger.error("Error polling wake requests: %s", e)
+            logger.error("Error checking job future: %s", e)
             
         self.after(3000, self.poll_requests)
         
@@ -530,6 +529,73 @@ class ListenerDashboard(tk.Tk):
     def destroy_and_exit(self):
         self.destroy()
         sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Background Pipeline Execution Helpers
+# ---------------------------------------------------------------------------
+active_jobs = 0
+max_concurrent_jobs = 1
+
+async def get_next_pending_job():
+    from database import DatabaseConnection, DATABASE_URL
+    async with DatabaseConnection(DATABASE_URL) as db:
+        async with db.execute(
+            "SELECT id, story_text, story_filename, voice, user_id FROM jobs WHERE status = 'pending_approval' ORDER BY created_at ASC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return None
+            job_data = dict(row)
+            
+            # Fetch username
+            username = "unknown"
+            async with db.execute("SELECT username FROM users WHERE id = ?", (job_data["user_id"],)) as ucur:
+                urow = await ucur.fetchone()
+                if urow:
+                    username = urow["username"]
+            job_data["username"] = username
+            
+            # Lock the job immediately so no other poll grabs it
+            await db.execute(
+                "UPDATE jobs SET status = 'prompting_approval', current_step = 'prompting_approval' WHERE id = ?",
+                (job_data["id"],)
+            )
+            await db.commit()
+            return job_data
+
+async def run_pipeline_task(job_id: str, story_text: str):
+    global active_jobs
+    active_jobs += 1
+    logger.info("Starting pipeline task locally for job %s...", job_id)
+    try:
+        from services.orchestrator import _run_pipeline_impl
+        from config import settings
+        
+        # Override backend public url so download URLs point to the local tunnel URL
+        global tunnel_url
+        settings.backend_public_url = tunnel_url
+        logger.info("Set backend_public_url = %s", tunnel_url)
+        
+        await _run_pipeline_impl(job_id, story_text)
+        logger.info("Pipeline task completed locally for job %s.", job_id)
+    except Exception as e:
+        logger.error("Error executing pipeline task locally for job %s: %s", job_id, e)
+    finally:
+        active_jobs -= 1
+
+async def decline_job(job_id: str):
+    from database import update_job
+    from services.orchestrator import _append_log
+    await update_job(
+        job_id,
+        status="failed",
+        current_step="failed",
+        error_message="Request declined by host laptop.",
+        completed_at=datetime.now(timezone.utc).isoformat()
+    )
+    await _append_log(job_id, "FAILED: Request declined by host laptop.")
+
 
 if __name__ == "__main__":
     logger.info("Starting StoryForge Server Dashboard Dashboard Application...")
