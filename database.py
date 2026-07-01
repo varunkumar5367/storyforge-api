@@ -278,8 +278,23 @@ class DatabaseConnection:
             pool = await get_pg_pool()
             if pool is None:
                 raise ImportError("PostgreSQL connection requested, but connection pool could not be initialized.")
-            self.conn_ctx = pool.connection()
-            self.conn = await self.conn_ctx.__aenter__()
+            
+            # Retry connection acquisition with exponential back-off
+            import time
+            retries = 5
+            backoff = 0.5
+            for attempt in range(retries):
+                try:
+                    self.conn_ctx = pool.connection()
+                    self.conn = await self.conn_ctx.__aenter__()
+                    break
+                except Exception as exc:
+                    if attempt == retries - 1:
+                        logger.error("Failed to connect to PostgreSQL pool after %d attempts: %s", retries, exc)
+                        raise exc
+                    logger.warning("PostgreSQL pool connection failed (attempt %d/%d), retrying in %ss: %s", attempt + 1, retries, backoff, exc)
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
         else:
             self.conn = await aiosqlite.connect(self.database_url)
             self.conn.row_factory = aiosqlite.Row

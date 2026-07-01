@@ -512,35 +512,65 @@ async def _download_local_diffusers(
             logger.info("Loading local diffusers model: %s on %s", model_id, device)
             
             if model_id == "ByteDance/SDXL-Lightning-4step":
-                # Use official SDXL-Lightning 4-step recipe
-                from huggingface_hub import hf_hub_download
-                from safetensors.torch import load_file
+                # Check if we already have a pre-merged model folder saved locally on the E: drive
+                import os
+                hf_home = os.environ.get("HF_HOME", ".")
+                merged_local_path = os.path.join(os.path.dirname(hf_home) if hf_home != "." else ".", "sdxl_lightning_4step_merged")
                 
-                base = "stabilityai/stable-diffusion-xl-base-1.0"
-                repo = "ByteDance/SDXL-Lightning"
-                ckpt = "sdxl_lightning_4step_unet.safetensors"
-                
-                logger.info("Loading base SDXL pipeline: %s", base)
-                try:
-                    pipe = StableDiffusionXLPipeline.from_pretrained(
-                        base,
-                        torch_dtype=torch_dtype,
-                        variant="fp16" if device == "cuda" else None,
+                if os.path.exists(merged_local_path) and os.path.exists(os.path.join(merged_local_path, "model_index.json")):
+                    logger.info("Loading pre-merged SDXL-Lightning pipeline from local disk: %s", merged_local_path)
+                    try:
+                        pipe = StableDiffusionXLPipeline.from_pretrained(
+                            merged_local_path,
+                            torch_dtype=torch_dtype,
+                            use_safetensors=True,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed loading pre-merged model from %s: %s. Retrying dynamic merge...", merged_local_path, e)
+                        merged_local_path = None
+                else:
+                    merged_local_path = None
+
+                if merged_local_path is None:
+                    # Perform dynamic merge of base SDXL and Lightning UNet
+                    from huggingface_hub import hf_hub_download
+                    from safetensors.torch import load_file
+                    
+                    base = "stabilityai/stable-diffusion-xl-base-1.0"
+                    repo = "ByteDance/SDXL-Lightning"
+                    ckpt = "sdxl_lightning_4step_unet.safetensors"
+                    
+                    logger.info("Loading base SDXL pipeline: %s", base)
+                    try:
+                        pipe = StableDiffusionXLPipeline.from_pretrained(
+                            base,
+                            torch_dtype=torch_dtype,
+                            variant="fp16" if device == "cuda" else None,
+                        )
+                    except (ValueError, OSError):
+                        logger.warning("Failed loading SDXL with variant='fp16', retrying without variant")
+                        pipe = StableDiffusionXLPipeline.from_pretrained(
+                            base,
+                            torch_dtype=torch_dtype,
+                        )
+                    
+                    logger.info("Overwriting UNet weights with lightning checkpoint: %s", ckpt)
+                    pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device="cpu"))
+                    
+                    pipe.scheduler = EulerDiscreteScheduler.from_config(
+                        pipe.scheduler.config,
+                        timestep_spacing="trailing"
                     )
-                except (ValueError, OSError):
-                    logger.warning("Failed loading SDXL with variant='fp16', retrying without variant")
-                    pipe = StableDiffusionXLPipeline.from_pretrained(
-                        base,
-                        torch_dtype=torch_dtype,
-                    )
-                
-                logger.info("Overwriting UNet weights with lightning checkpoint: %s", ckpt)
-                pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device="cpu"))
-                
-                pipe.scheduler = EulerDiscreteScheduler.from_config(
-                    pipe.scheduler.config,
-                    timestep_spacing="trailing"
-                )
+                    
+                    # Auto-save the merged pipeline to disk for future fast startups
+                    try:
+                        save_path = os.path.join(os.path.dirname(hf_home) if hf_home != "." else ".", "sdxl_lightning_4step_merged")
+                        logger.info("Auto-saving merged SDXL-Lightning pipeline to local disk: %s", save_path)
+                        os.makedirs(save_path, exist_ok=True)
+                        pipe.save_pretrained(save_path)
+                        logger.info("Merged model saved successfully!")
+                    except Exception as e:
+                        logger.warning("Failed to auto-save merged model: %s", e)
             else:
                 # Load generic model directly
                 try:

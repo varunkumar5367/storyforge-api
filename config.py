@@ -5,6 +5,10 @@ All URLs and secrets must come from environment variables — never hardcoded.
 
 from __future__ import annotations
 
+import socket
+# Set default socket timeout to 30s to prevent indefinite hangs on dead connections
+socket.setdefaulttimeout(30.0)
+
 from functools import lru_cache
 from typing import Optional
 
@@ -93,7 +97,12 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    # Export HF_TOKEN to system environment so huggingface_hub uses it for authenticated downloads
+    if s.huggingface_api_key:
+        import os
+        os.environ["HF_TOKEN"] = s.huggingface_api_key
+    return s
 
 
 settings = get_settings()

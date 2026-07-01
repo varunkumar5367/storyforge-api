@@ -47,7 +47,7 @@ Scenes:
 Return a JSON object with this exact structure:
 {{
   "title": "Compelling YouTube title (max 70 chars, no clickbait)",
-  "description": "Full YouTube description (300-500 words). Include:\\n- Hook (first 2 lines)\\n- Story synopsis\\n- Timestamps (one per scene)\\n- Call to action",
+  "description": "Full YouTube description (300-500 words). Include:\\n- Hook (first 2 lines)\\n- Story synopsis\\n- Timestamps (use the EXACT timestamps provided in the scene list next to each scene below, do not modify or invent them)\\n- Call to action",
   "hashtags": "#tag1 #tag2 #tag3 ... (15-20 relevant hashtags)"
 }}
 """
@@ -133,11 +133,26 @@ async def generate_metadata(
 # ---------------------------------------------------------------------------
 def _build_scene_summary(scenes: list[dict]) -> str:
     lines = []
-    for s in scenes:
+    accumulated_time = 0.0
+    for i, s in enumerate(scenes):
         scene = Scene(**s)
+        
+        # Format the accumulated time into [m:ss] format
+        minutes = int(accumulated_time // 60)
+        seconds = int(accumulated_time % 60)
+        timestamp_str = f"[{minutes:d}:{seconds:02d}]"
+        
         lines.append(
-            f"  Scene {scene.scene_number}: {scene.title} — {scene.mood} — {scene.location}"
+            f"  Scene {scene.scene_number} {timestamp_str}: {scene.title} — {scene.mood} — {scene.location}"
         )
+        
+        # Accumulate scene duration (offset by xfade duration overlap)
+        duration = scene.duration_hint or 10.0
+        accumulated_time += duration
+        if i > 0:
+            # Transitions overlap by 0.5 seconds in recursive batch xfade mode
+            accumulated_time -= 0.5
+            
     return "\n".join(lines)
 
 
