@@ -492,7 +492,9 @@ async def _download_local_diffusers(
     import io
 
     def _generate():
-        from diffusers import StableDiffusionXLPipeline, DiffusionPipeline, EulerDiscreteScheduler
+        from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
+        from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+        from diffusers.schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
         import os
         
         # Check if FORCE_CPU override is set (from GUI RAM/VRAM toggle)
