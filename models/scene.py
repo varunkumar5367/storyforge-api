@@ -80,6 +80,23 @@ class Scene(BaseModel):
     audio_path: str | None = None
     subtitle_path: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def clean_characters_present(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            chars = data.get("characters_present")
+            if isinstance(chars, list):
+                cleaned = []
+                for c in chars:
+                    if isinstance(c, dict):
+                        # Extract name if it's a dict
+                        name = c.get("name") or c.get("character") or str(c)
+                        cleaned.append(str(name))
+                    else:
+                        cleaned.append(str(c))
+                data["characters_present"] = cleaned
+        return data
+
     @model_validator(mode="after")
     def sync_narration(self) -> "Scene":
         """
