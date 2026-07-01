@@ -37,6 +37,7 @@ MAX_FILE_SIZE_BYTES = 500_000  # 500 KB — generous for a story .txt
 async def upload_story(
     file: UploadFile = File(..., description="Plain-text story file (.txt)"),
     voice: str = Form(default="en-US-JennyNeural", description="Voice ID to use for narration"),
+    image_model: str = Form(default="ByteDance/SDXL-Lightning-4step", description="Image generation model ID"),
     current_user: dict = Depends(get_current_user),
 ) -> JobCreateResponse:
     """
@@ -94,8 +95,8 @@ async def upload_story(
 
     # Create job record
     job_id = str(uuid.uuid4())
-    await create_job(job_id, story_text, file.filename, voice, current_user["id"])
-    logger.info("New job created: %s | user=%s | file=%s | chars=%d | voice=%s", job_id, current_user["username"], file.filename, len(story_text), voice)
+    await create_job(job_id, story_text, file.filename, voice, current_user["id"], image_model)
+    logger.info("New job created: %s | user=%s | file=%s | chars=%d | voice=%s | model=%s", job_id, current_user["username"], file.filename, len(story_text), voice, image_model)
 
     # Launch pipeline as a named asyncio.Task — returns immediately
     start_pipeline(job_id, story_text)

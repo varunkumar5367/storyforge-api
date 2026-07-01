@@ -130,6 +130,7 @@ async def generate_image_for_scene(
     width: int = IMAGE_WIDTH,
     height: int = IMAGE_HEIGHT,
     art_style_suffix: str = ART_STYLE,
+    image_model: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate an image for a single scene and return the updated scene dict.
@@ -155,11 +156,13 @@ async def generate_image_for_scene(
             result = await _generate_scene_image(
                 owned_client, job_id, scene_obj, char_mem,
                 width=width, height=height, art_style_suffix=art_style_suffix,
+                image_model=image_model,
             )
     else:
         result = await _generate_scene_image(
             client, job_id, scene_obj, char_mem,
             width=width, height=height, art_style_suffix=art_style_suffix,
+            image_model=image_model,
         )
 
     if result.success and result.path:
@@ -270,6 +273,7 @@ async def _generate_scene_image(
     width: int = IMAGE_WIDTH,
     height: int = IMAGE_HEIGHT,
     art_style_suffix: str = ART_STYLE,
+    image_model: str | None = None,
 ) -> _ImageResult:
     """Build the prompt, download via provider chain, and save to disk."""
     prompt = _build_scene_prompt(scene, char_mem, art_style_suffix=art_style_suffix)
@@ -284,7 +288,7 @@ async def _generate_scene_image(
     logger.debug("Scene %03d full prompt:\n%s", scene.scene_number, prompt)
 
     image_bytes, provider, download_error = await _download_with_retry(
-        client, prompt, seed, scene.scene_number, width=width, height=height
+        client, prompt, seed, scene.scene_number, width=width, height=height, image_model=image_model
     )
 
     if download_error:
@@ -436,6 +440,7 @@ async def _download_with_retry(
     *,
     width: int = IMAGE_WIDTH,
     height: int = IMAGE_HEIGHT,
+    image_model: str | None = None,
 ) -> tuple[bytes, str | None, str | None]:
     """
     Try providers in priority order with exponential back-off between attempts.
@@ -459,7 +464,7 @@ async def _download_with_retry(
             await asyncio.sleep(wait)
 
         image_bytes, provider, error = await _try_all_providers(
-            client, prompt, seed, scene_number, width=width, height=height
+            client, prompt, seed, scene_number, width=width, height=height, image_model=image_model
         )
 
         if error is None and image_bytes:
@@ -485,6 +490,7 @@ async def _download_local_diffusers(
     *,
     width: int = IMAGE_WIDTH,
     height: int = IMAGE_HEIGHT,
+    image_model: str | None = None,
 ) -> tuple[bytes, str | None]:
     """Generate an image locally using PyTorch diffusers."""
     import gc
@@ -505,7 +511,7 @@ async def _download_local_diffusers(
         torch_dtype = torch.float16 if device == "cuda" else torch.float32
         logger.info("Diffusers device selected: %s (FORCE_CPU=%s)", device, force_cpu)
         
-        model_id = settings.local_image_model
+        model_id = image_model or settings.local_image_model
         pipe = None
         
         try:
@@ -648,6 +654,7 @@ async def _try_all_providers(
     *,
     width: int = IMAGE_WIDTH,
     height: int = IMAGE_HEIGHT,
+    image_model: str | None = None,
 ) -> tuple[bytes, str | None, str | None]:
     """
     Provider chain: Local Diffusers → Gemini → Hugging Face Paid → Pollinations → Stable Horde → HF Free → PIL Placeholder.
@@ -657,7 +664,7 @@ async def _try_all_providers(
     # 0. Local Diffusers
     if settings.use_local_images:
         local_bytes, local_err = await _download_local_diffusers(
-            prompt, seed, scene_number, width=width, height=height
+            prompt, seed, scene_number, width=width, height=height, image_model=image_model
         )
         if local_err is None and local_bytes:
             return local_bytes, "local_diffusers", None

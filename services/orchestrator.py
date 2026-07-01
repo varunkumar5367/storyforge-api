@@ -443,6 +443,7 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
         from database import get_job
         job = await get_job(job_id)
         voice = job.get("voice", DEFAULT_VOICE) if job else DEFAULT_VOICE
+        image_model = job.get("image_model", "ByteDance/SDXL-Lightning-4step") if job else "ByteDance/SDXL-Lightning-4step"
 
         wakeup_ok, wakeup_error = await warmup_voiceforge()
         if not wakeup_ok:
@@ -482,6 +483,7 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                     job_id, raw_scene, character_memory,
                     width=output_width, height=output_height,
                     art_style_suffix=art_style_suffix,
+                    image_model=image_model,
                 )
                 updated_scene = await generate_voice_for_scene(
                     voice_client, job_id, updated_scene, voice=voice
@@ -563,6 +565,7 @@ async def _run_pipeline_impl(job_id: str, story_text: str) -> None:
                     job_id, raw_scene, character_memory,
                     width=output_width, height=output_height,
                     art_style_suffix=art_style_suffix,
+                    image_model=image_model,
                 )
                 end_step("generating_images")
                 image_ok = updated_scene.get("image_path") is not None

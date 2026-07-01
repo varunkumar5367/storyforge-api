@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_message     TEXT,
     download_urls     TEXT,   -- JSON blob set on pipeline completion
     voice             TEXT NOT NULL DEFAULT 'en-US-JennyNeural',
+    image_model       TEXT NOT NULL DEFAULT 'ByteDance/SDXL-Lightning-4step',
     logs              TEXT    -- JSON list of log strings
 );
 """
@@ -404,6 +405,11 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
             await db.commit()
 
+        if "image_model" not in columns:
+            logger.info("Migrating database: adding 'image_model' column to 'jobs' table.")
+            await db.execute("ALTER TABLE jobs ADD COLUMN image_model TEXT NOT NULL DEFAULT 'ByteDance/SDXL-Lightning-4step'")
+            await db.commit()
+
         # Seed admin user if not exists
         admin_username = os.getenv("ADMIN_USERNAME", "varun5367")
         admin_password = os.getenv("ADMIN_PASSWORD", "Varun@5367")
@@ -430,7 +436,7 @@ async def init_db() -> None:
 # ---------------------------------------------------------------------------
 # Job CRUD
 # ---------------------------------------------------------------------------
-async def create_job(job_id: str, story_text: str, story_filename: str, voice: str = "en-US-JennyNeural", user_id: str | None = None) -> dict:
+async def create_job(job_id: str, story_text: str, story_filename: str, voice: str = "en-US-JennyNeural", user_id: str | None = None, image_model: str = "ByteDance/SDXL-Lightning-4step") -> dict:
     """Insert a new job row and return it as a dict."""
     now = datetime.now(timezone.utc).isoformat()
     async with DatabaseConnection(DATABASE_URL) as db:
@@ -439,10 +445,10 @@ async def create_job(job_id: str, story_text: str, story_filename: str, voice: s
             """
             INSERT INTO jobs
                 (id, status, progress_percent, current_step,
-                 story_text, story_filename, created_at, voice, user_id)
-            VALUES (?, 'pending', 0, 'queued', ?, ?, ?, ?, ?)
+                 story_text, story_filename, created_at, voice, user_id, image_model)
+            VALUES (?, 'pending', 0, 'queued', ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, story_text, story_filename, now, voice, user_id),
+            (job_id, story_text, story_filename, now, voice, user_id, image_model),
         )
         await db.commit()
         async with db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)) as cur:
