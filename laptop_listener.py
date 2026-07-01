@@ -18,6 +18,30 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import psutil
 
+# ── Single-instance guard (Windows) ─────────────────────────────────────
+if sys.platform == "win32":
+    import ctypes
+    _MUTEX_NAME = "Global\\StoryForgeLaptopListenerV1"
+    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    _last_error   = ctypes.windll.kernel32.GetLastError()
+    _ERROR_ALREADY_EXISTS = 183
+    if _last_error == _ERROR_ALREADY_EXISTS:
+        # Another instance is already running — focus its window and quit.
+        import ctypes.wintypes
+        HWND_BROADCAST = 0xFFFF
+        WM_APP_FOCUS   = 0x8000 + 1  # custom message agreed with the running instance
+        ctypes.windll.user32.PostMessageW(HWND_BROADCAST, WM_APP_FOCUS, 0, 0)
+        # Brief dialog so the user knows what happened
+        _tmp = tk.Tk()
+        _tmp.withdraw()
+        messagebox.showinfo(
+            "StoryForge Listener",
+            "The listener is already running!\nFocusing the existing window.",
+            parent=_tmp
+        )
+        _tmp.destroy()
+        sys.exit(0)
+
 # Windows Selector Event Loop Policy for psycopg
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
