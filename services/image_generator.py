@@ -586,19 +586,24 @@ async def _download_local_diffusers(
                         torch_dtype=torch_dtype,
                     )
                 
-            pipe = pipe.to(device)
+            if "flux" in model_id.lower() and device == "cuda":
+                logger.info("Enabling model CPU offload for local FLUX generation to prevent VRAM OOM")
+                pipe.enable_model_cpu_offload()
+            else:
+                pipe = pipe.to(device)
             
             # Enforce safety checker bypass (optional, to save memory/speed)
             if hasattr(pipe, "safety_checker") and pipe.safety_checker is not None:
                 pipe.safety_checker = None
                 
             # Set up seed/generator
-            generator = torch.Generator(device=device).manual_seed(seed)
+            gen_device = "cpu" if ("flux" in model_id.lower() and device == "cuda") else device
+            generator = torch.Generator(device=gen_device).manual_seed(seed)
             
             # Run image generation
-            # Note: for SDXL-Lightning/LCM we use 4 steps. For others we default to 25.
-            num_inference_steps = 4 if "lightning" in model_id.lower() or "lcm" in model_id.lower() or "turbo" in model_id.lower() else 25
-            guidance_scale = 0.0 if "lightning" in model_id.lower() or "turbo" in model_id.lower() else 7.5
+            # Note: for SDXL-Lightning/LCM/Schnell we use 4 steps. For others we default to 25.
+            num_inference_steps = 4 if "lightning" in model_id.lower() or "lcm" in model_id.lower() or "turbo" in model_id.lower() or "schnell" in model_id.lower() else 25
+            guidance_scale = 0.0 if "lightning" in model_id.lower() or "turbo" in model_id.lower() or "schnell" in model_id.lower() else (3.5 if "flux" in model_id.lower() else 7.5)
             
             logger.info("Generating local image | steps=%d | guidance=%.1f", num_inference_steps, guidance_scale)
             
