@@ -8,6 +8,8 @@ Schema matches story_analyzer LLM output:
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -55,7 +57,7 @@ class Scene(BaseModel):
     )
     image_prompt: str = Field(
         default="a storytelling scene",
-        description="Detailed, vivid Pollinations.ai image generation prompt"
+        description="Detailed, vivid image generation prompt"
     )
     camera: str = Field(
         default="slow_zoom_in",
@@ -82,19 +84,50 @@ class Scene(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def clean_characters_present(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            chars = data.get("characters_present")
-            if isinstance(chars, list):
-                cleaned = []
-                for c in chars:
-                    if isinstance(c, dict):
-                        # Extract name if it's a dict
-                        name = c.get("name") or c.get("character") or str(c)
-                        cleaned.append(str(name))
-                    else:
-                        cleaned.append(str(c))
-                data["characters_present"] = cleaned
+    def sanitize_llm_output(cls, data: Any) -> Any:
+        """
+        Robustly coerce LLM output quirks before Pydantic validation runs.
+
+        Handles two common LLM hallucination patterns:
+          1. String fields returned as a list  → joined with ', '
+          2. characters_present items returned as dicts → name extracted
+        """
+        if not isinstance(data, dict):
+            return data
+
+        # ── 1. Coerce string fields that arrived as lists ─────────────────
+        str_fields = ("location", "setting", "mood", "title", "text", "narration",
+                      "image_prompt", "camera")
+        for field in str_fields:
+            val = data.get(field)
+            if isinstance(val, list):
+                # Join non-empty string items; fall back to empty string
+                data[field] = ", ".join(str(v) for v in val if v) or ""
+
+        # ── 2. Coerce characters_present items that arrived as dicts ──────
+        chars = data.get("characters_present")
+        if isinstance(chars, list):
+            cleaned = []
+            for c in chars:
+                if isinstance(c, dict):
+                    name = c.get("name") or c.get("character") or str(c)
+                    cleaned.append(str(name))
+                else:
+                    cleaned.append(str(c))
+            data["characters_present"] = cleaned
+
+        # ── 3. Coerce key_objects items that arrived as dicts ─────────────
+        key_objs = data.get("key_objects")
+        if isinstance(key_objs, list):
+            cleaned_objs = []
+            for obj in key_objs:
+                if isinstance(obj, dict):
+                    label = obj.get("name") or obj.get("object") or str(obj)
+                    cleaned_objs.append(str(label))
+                else:
+                    cleaned_objs.append(str(obj))
+            data["key_objects"] = cleaned_objs
+
         return data
 
     @model_validator(mode="after")
