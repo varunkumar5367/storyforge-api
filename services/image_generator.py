@@ -513,7 +513,6 @@ async def _download_local_diffusers(
             
             if model_id == "ByteDance/SDXL-Lightning-4step":
                 # Use official SDXL-Lightning 4-step recipe
-                from diffusers import UNet2DConditionModel
                 from huggingface_hub import hf_hub_download
                 from safetensors.torch import load_file
                 
@@ -521,14 +520,10 @@ async def _download_local_diffusers(
                 repo = "ByteDance/SDXL-Lightning"
                 ckpt = "sdxl_lightning_4step_unet.safetensors"
                 
-                logger.info("Fetching unet config from %s and checkpoint %s from %s", base, ckpt, repo)
-                unet = UNet2DConditionModel.from_config(base, subfolder="unet")
-                unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device="cpu"))
-                
+                logger.info("Loading base SDXL pipeline: %s", base)
                 try:
                     pipe = StableDiffusionXLPipeline.from_pretrained(
                         base,
-                        unet=unet,
                         torch_dtype=torch_dtype,
                         variant="fp16" if device == "cuda" else None,
                     )
@@ -536,9 +531,12 @@ async def _download_local_diffusers(
                     logger.warning("Failed loading SDXL with variant='fp16', retrying without variant")
                     pipe = StableDiffusionXLPipeline.from_pretrained(
                         base,
-                        unet=unet,
                         torch_dtype=torch_dtype,
                     )
+                
+                logger.info("Overwriting UNet weights with lightning checkpoint: %s", ckpt)
+                pipe.unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device="cpu"))
+                
                 pipe.scheduler = EulerDiscreteScheduler.from_config(
                     pipe.scheduler.config,
                     timestep_spacing="trailing"
