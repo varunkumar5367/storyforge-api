@@ -227,28 +227,29 @@ async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
     
     now = datetime.now(timezone.utc)
     one_day_ago = (now - timedelta(days=1)).isoformat()
+    one_week_ago = (now - timedelta(days=7)).isoformat()
     thirty_days_ago = (now - timedelta(days=30)).isoformat()
     
     async with DatabaseConnection(DATABASE_URL) as db:
-        # ── 1. Renders ────────────────────────────────────────────────────────
-        async with db.execute("SELECT COUNT(*) as count FROM analytics_renders WHERE status = 'completed'") as cur:
+        # ── 1. Renders (Weekly Reset) ─────────────────────────────────────────
+        async with db.execute("SELECT COUNT(*) as count FROM analytics_renders WHERE status = 'completed' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             completed_count = row["count"] if row else 0
             
-        async with db.execute("SELECT COUNT(*) as count FROM analytics_renders WHERE status = 'failed'") as cur:
+        async with db.execute("SELECT COUNT(*) as count FROM analytics_renders WHERE status = 'failed' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             failed_count = row["count"] if row else 0
             
-        async with db.execute("SELECT AVG(total_duration) as avg_dur FROM analytics_renders WHERE status = 'completed'") as cur:
+        async with db.execute("SELECT AVG(total_duration) as avg_dur FROM analytics_renders WHERE status = 'completed' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             avg_duration = round(row["avg_dur"], 2) if (row and row["avg_dur"] is not None) else 0.0
             
-        async with db.execute("SELECT MAX(peak_memory_mb) as max_mem, AVG(peak_memory_mb) as avg_mem FROM analytics_renders") as cur:
+        async with db.execute("SELECT MAX(peak_memory_mb) as max_mem, AVG(peak_memory_mb) as avg_mem FROM analytics_renders WHERE created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             max_memory = round(row["max_mem"], 2) if (row and row["max_mem"] is not None) else 0.0
             avg_memory = round(row["avg_mem"], 2) if (row and row["avg_mem"] is not None) else 0.0
 
-        # Step durations average
+        # Step durations average (Weekly Reset)
         avg_steps = {
             "analyzing": 0.0,
             "generating_images": 0.0,
@@ -258,7 +259,7 @@ async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
             "generating_metadata": 0.0,
             "generating_thumbnail": 0.0
         }
-        async with db.execute("SELECT step_durations FROM analytics_renders WHERE status = 'completed'") as cur:
+        async with db.execute("SELECT step_durations FROM analytics_renders WHERE status = 'completed' AND created_at > ?", (one_week_ago,)) as cur:
             rows = await cur.fetchall()
             count = len(rows)
             if count > 0:
@@ -273,30 +274,33 @@ async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
                 for k in avg_steps:
                     avg_steps[k] = round(sums[k] / count, 2)
 
-        # Recent renders
+        # Recent renders (Weekly Reset)
         async with db.execute(
             """
             SELECT id, job_id, username, total_duration, peak_memory_mb, status, created_at 
             FROM analytics_renders 
+            WHERE created_at > ?
             ORDER BY created_at DESC LIMIT 10
-            """
+            """,
+            (one_week_ago,)
         ) as cur:
             rows = await cur.fetchall()
             recent_renders = [dict(r) for r in rows]
 
-        # ── 2. FFmpeg Failures ────────────────────────────────────────────────
+        # ── 2. FFmpeg Failures (Weekly Reset) ─────────────────────────────────
         async with db.execute(
             """
             SELECT id, job_id, username, total_duration, status, error_message, ffmpeg_cmd, ffmpeg_stderr, created_at 
             FROM analytics_renders 
-            WHERE status = 'failed' AND ffmpeg_stderr IS NOT NULL AND ffmpeg_stderr != ''
+            WHERE status = 'failed' AND ffmpeg_stderr IS NOT NULL AND ffmpeg_stderr != '' AND created_at > ?
             ORDER BY created_at DESC LIMIT 10
-            """
+            """,
+            (one_week_ago,)
         ) as cur:
             rows = await cur.fetchall()
             ffmpeg_failures = [dict(r) for r in rows]
 
-        # ── 3. User activity & Conversion ─────────────────────────────────────
+        # ── 3. User activity & Conversion (General Window) ────────────────────
         async with db.execute("SELECT COUNT(*) as count FROM users") as cur:
             row = await cur.fetchone()
             total_users = row["count"] if row else 0
@@ -309,30 +313,30 @@ async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
             row = await cur.fetchone()
             active_30d = row["count"] if row else 0
             
-        async with db.execute("SELECT COUNT(DISTINCT user_id) as count FROM jobs WHERE status = 'completed'") as cur:
+        async with db.execute("SELECT COUNT(DISTINCT user_id) as count FROM jobs WHERE status = 'completed' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             users_with_jobs = row["count"] if row else 0
             
         conversion_rate = round((users_with_jobs / total_users) * 100, 2) if total_users > 0 else 0.0
 
-        # ── 4. Credits ────────────────────────────────────────────────────────
+        # ── 4. Credits (Weekly Reset where applicable) ────────────────────────
         async with db.execute("SELECT SUM(pollen_balance) as sum_bal FROM users") as cur:
             row = await cur.fetchone()
             total_credits_held = round(row["sum_bal"], 2) if (row and row["sum_bal"] is not None) else 0.0
             
-        async with db.execute("SELECT SUM(credit_consumed) as sum_consumed FROM analytics_renders WHERE status = 'completed'") as cur:
+        async with db.execute("SELECT SUM(credit_consumed) as sum_consumed FROM analytics_renders WHERE status = 'completed' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             total_credits_consumed = round(row["sum_consumed"], 2) if (row and row["sum_consumed"] is not None) else 0.0
             
-        async with db.execute("SELECT SUM(amount) as sum_req FROM pollen_requests") as cur:
+        async with db.execute("SELECT SUM(amount) as sum_req FROM pollen_requests WHERE created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             total_requested = round(row["sum_req"], 2) if (row and row["sum_req"] is not None) else 0.0
             
-        async with db.execute("SELECT SUM(amount) as sum_app FROM pollen_requests WHERE status = 'approved'") as cur:
+        async with db.execute("SELECT SUM(amount) as sum_app FROM pollen_requests WHERE status = 'approved' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             total_approved = round(row["sum_app"], 2) if (row and row["sum_app"] is not None) else 0.0
             
-        async with db.execute("SELECT SUM(amount) as sum_den FROM pollen_requests WHERE status = 'denied'") as cur:
+        async with db.execute("SELECT SUM(amount) as sum_den FROM pollen_requests WHERE status = 'denied' AND created_at > ?", (one_week_ago,)) as cur:
             row = await cur.fetchone()
             total_denied = round(row["sum_den"], 2) if (row and row["sum_den"] is not None) else 0.0
 
@@ -340,10 +344,11 @@ async def get_admin_analytics(admin: dict = Depends(get_admin_user)):
             """
             SELECT username, SUM(credit_consumed) as consumed 
             FROM analytics_renders 
-            WHERE status = 'completed' AND username IS NOT NULL 
+            WHERE status = 'completed' AND username IS NOT NULL AND created_at > ?
             GROUP BY username 
             ORDER BY consumed DESC LIMIT 5
-            """
+            """,
+            (one_week_ago,)
         ) as cur:
             rows = await cur.fetchall()
             credits_by_user = [dict(r) for r in rows]
@@ -426,4 +431,50 @@ async def review_admin_wake_request(request_id: str, payload: WakeReviewPayload,
         raise HTTPException(status_code=400, detail="Status must be 'accepted' or 'ignored'.")
     reviewed = await review_wake_request(request_id, payload.status)
     return {"success": True, "reviewed": reviewed}
+
+
+class RoleUpdatePayload(BaseModel):
+    role: str
+
+
+@router.put(
+    "/users/{user_id}/role",
+    summary="Update a user's role (Main Admin only)",
+)
+async def edit_user_role(
+    user_id: str,
+    payload: RoleUpdatePayload,
+    admin: dict = Depends(get_admin_user)
+):
+    """
+    Update a user's role. Only the main admin (username: varun5367) can promote users to 'admin'.
+    """
+    if payload.role == "admin" and admin.get("username") != "varun5367":
+        raise HTTPException(
+            status_code=403,
+            detail="Only the main admin (varun5367) can promote users to admin."
+        )
+
+    if payload.role not in ("user", "admin"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid role. Must be 'user' or 'admin'."
+        )
+
+    from database import DatabaseConnection, DATABASE_URL
+    async with DatabaseConnection(DATABASE_URL) as db:
+        # Check if the user exists
+        async with db.execute("SELECT id, username, role FROM users WHERE id = ?", (user_id,)) as cur:
+            user = await cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found.")
+            
+            # Prevent demoting the main admin
+            if user["username"] == "varun5367" and payload.role != "admin":
+                raise HTTPException(status_code=403, detail="Cannot change the role of the main admin.")
+
+        await db.execute("UPDATE users SET role = ? WHERE id = ?", (payload.role, user_id))
+        
+    return {"success": True, "role": payload.role}
+
 
