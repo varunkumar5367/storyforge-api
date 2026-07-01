@@ -64,6 +64,39 @@ async def llm_chat(
     """
     import asyncio
     import time
+    import httpx
+    from config import settings
+
+    if settings.use_local_llm:
+        logger.info(
+            "Calling local Ollama LLM: model=%s | prompt_len=%d",
+            settings.ollama_model,
+            len(user_prompt),
+        )
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as local_client:
+                resp = await local_client.post(
+                    f"{settings.ollama_url.rstrip('/')}/chat/completions",
+                    json={
+                        "model": settings.ollama_model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user",   "content": user_prompt},
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    }
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                text = data["choices"][0]["message"]["content"] or ""
+                logger.debug("Local Ollama response | model=%s | chars=%d", settings.ollama_model, len(text))
+                return text
+        except Exception as exc:
+            logger.error("Local Ollama LLM call failed: %s", str(exc))
+            raise exc
+
     # Build list of models to try, starting with the requested model
     fallbacks = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     models_to_try = [model]
@@ -167,15 +200,84 @@ async def transcribe_audio(
         The full Groq transcription response as a dict.
     """
     import asyncio
+    import gc
+    import torch
+    from config import settings
+
     if timestamp_granularities is None:
         timestamp_granularities = ["word", "segment"]
 
-    client = get_groq_client()
     audio_path = Path(audio_path)
-
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
+    if settings.use_local_whisper:
+        logger.info(
+            "Transcribing '%s' locally using faster-whisper: model=%s",
+            audio_path.name,
+            settings.local_whisper_model,
+        )
+        
+        def _transcribe():
+            from faster_whisper import WhisperModel
+            import os
+            force_cpu = os.environ.get("FORCE_CPU", "0").strip().lower() in ("1", "true", "yes")
+            device = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+            compute_type = "float16" if device == "cuda" else "int8"
+            logger.info("Whisper device selected: %s (FORCE_CPU=%s)", device, force_cpu)
+            
+            try:
+                whisper_model = WhisperModel(
+                    settings.local_whisper_model,
+                    device=device,
+                    compute_type=compute_type,
+                )
+                segments_gen, info = whisper_model.transcribe(
+                    str(audio_path),
+                    language=language,
+                    word_timestamps=True,
+                )
+                segments_list = list(segments_gen)
+                
+                formatted_segments = []
+                all_words = []
+                full_text = ""
+                for seg in segments_list:
+                    full_text += seg.text + " "
+                    seg_dict = {
+                        "id": seg.id,
+                        "start": seg.start,
+                        "end": seg.end,
+                        "text": seg.text,
+                        "words": []
+                    }
+                    if seg.words:
+                        for w in seg.words:
+                            word_dict = {
+                                "word": w.word,
+                                "start": w.start,
+                                "end": w.end
+                            }
+                            seg_dict["words"].append(word_dict)
+                            all_words.append(word_dict)
+                    formatted_segments.append(seg_dict)
+                
+                return {
+                    "text": full_text.strip(),
+                    "segments": formatted_segments,
+                    "words": all_words,
+                }
+            finally:
+                if 'whisper_model' in locals():
+                    del whisper_model
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    
+        result_dict = await asyncio.to_thread(_transcribe)
+        return result_dict
+
+    client = get_groq_client()
     max_retries = 4
     last_exc = None
 

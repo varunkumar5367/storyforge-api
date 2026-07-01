@@ -43,6 +43,23 @@ tunnel_url = None
 is_running_server = False
 db_loop = None  # Asyncio loop running in the database thread
 
+# GPU mode — True = GPU (VRAM), False = CPU (RAM)
+# Initialise from env so setting persists across listener restarts via .env
+use_gpu_mode: bool = os.environ.get("FORCE_CPU", "0").strip().lower() not in ("1", "true", "yes")
+
+
+def _get_vram_info() -> tuple[float, float] | None:
+    """Return (used_MB, total_MB) VRAM or None if CUDA not available."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        used = torch.cuda.memory_allocated(0) / 1024 ** 2
+        total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 2
+        return used, total
+    except Exception:
+        return None
+
 def kill_process_tree(pid: int):
     try:
         parent = psutil.Process(pid)
@@ -201,109 +218,129 @@ class ListenerDashboard(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("StoryForge — Server Dashboard")
-        self.geometry("500x420")
+        self.geometry("560x530")
         self.resizable(False, False)
-        
+
         # Style Configuration
         self.style = ttk.Style()
         self.style.theme_use('clam')
-        
+
         # Colors & Font styling
-        self.configure(bg="#0f172a") # dark slate
+        self.configure(bg="#0f172a")
         self.style.configure(".", background="#0f172a", foreground="white")
         self.style.configure("TFrame", background="#0f172a")
         self.style.configure("TLabel", background="#0f172a", foreground="white")
-        
+        self.style.configure("TLabelframe", background="#0f172a", foreground="#94a3b8")
+        self.style.configure("TLabelframe.Label", background="#0f172a", foreground="#94a3b8", font=("Segoe UI", 9, "bold"))
+        self.style.configure("Horizontal.TProgressbar", troughcolor="#1e293b", background="#10b981", thickness=14)
+        self.style.configure("VRAM.Horizontal.TProgressbar", troughcolor="#1e293b", background="#8b5cf6", thickness=14)
+
         # Main Layout
         self.main_frame = ttk.Frame(self, padding="20")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Header
+
+        # ── Header ─────────────────────────────────────────────────────────
         self.header_label = ttk.Label(self.main_frame, text="StoryForge Backend", font=("Segoe UI", 18, "bold"), foreground="#a78bfa")
-        self.header_label.pack(anchor=tk.W, pady=(0, 5))
-        
-        self.sub_label = ttk.Label(self.main_frame, text="Always-on background listener daemon for wake requests", font=("Segoe UI", 9), foreground="#94a3b8")
-        self.sub_label.pack(anchor=tk.W, pady=(0, 20))
-        
-        # Status Card
-        self.status_card = ttk.LabelFrame(self.main_frame, text="System Status", padding="15")
-        self.status_card.pack(fill=tk.X, pady=(0, 20))
-        
+        self.header_label.pack(anchor=tk.W, pady=(0, 2))
+        self.sub_label = ttk.Label(self.main_frame, text="Laptop GPU Listener — AI generation daemon", font=("Segoe UI", 9), foreground="#94a3b8")
+        self.sub_label.pack(anchor=tk.W, pady=(0, 14))
+
+        # ── Server Status Card ─────────────────────────────────────────────
+        self.status_card = ttk.LabelFrame(self.main_frame, text="Server Status", padding="12")
+        self.status_card.pack(fill=tk.X, pady=(0, 12))
+
         status_row = ttk.Frame(self.status_card)
-        status_row.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(status_row, text="Server State: ", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
-        self.state_indicator = ttk.Label(status_row, text="OFFLINE", font=("Segoe UI", 11, "bold"), foreground="#ef4444")
+        status_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(status_row, text="State: ", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
+        self.state_indicator = ttk.Label(status_row, text="● OFFLINE", font=("Segoe UI", 11, "bold"), foreground="#ef4444")
         self.state_indicator.pack(side=tk.LEFT)
-        
+
         url_row = ttk.Frame(self.status_card)
-        url_row.pack(fill=tk.X, pady=(0, 5))
-        
-        ttk.Label(url_row, text="Tunnel URL: ", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
-        self.url_label = ttk.Entry(url_row, font=("Consolas", 9), width=35, background="#1e293b", foreground="#a78bfa")
+        url_row.pack(fill=tk.X)
+        ttk.Label(url_row, text="Tunnel: ", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        self.url_label = ttk.Entry(url_row, font=("Consolas", 9), width=38, background="#1e293b", foreground="#a78bfa")
         self.url_label.pack(side=tk.LEFT, padx=(5, 5))
         self.url_label.insert(0, "Not established")
         self.url_label.config(state="readonly")
-        
         self.copy_btn = tk.Button(url_row, text="Copy", command=self.copy_url, font=("Segoe UI", 8), bg="#334155", fg="white", borderwidth=0, padx=8, pady=2)
         self.copy_btn.pack(side=tk.LEFT)
-        
-        # Performance Gauges
-        self.perf_card = ttk.LabelFrame(self.main_frame, text="Resources & Activity", padding="15")
-        self.perf_card.pack(fill=tk.X, pady=(0, 20))
-        
+
+        # ── GPU / RAM Mode Toggle Card ──────────────────────────────────────
+        self.gpu_card = ttk.LabelFrame(self.main_frame, text="Compute Mode", padding="12")
+        self.gpu_card.pack(fill=tk.X, pady=(0, 12))
+
+        gpu_top = ttk.Frame(self.gpu_card)
+        gpu_top.pack(fill=tk.X, pady=(0, 8))
+
+        self.mode_label = ttk.Label(gpu_top, text="", font=("Segoe UI", 11, "bold"))
+        self.mode_label.pack(side=tk.LEFT)
+
+        self.gpu_toggle_btn = tk.Button(
+            gpu_top,
+            text="",
+            command=self.toggle_compute_mode,
+            font=("Segoe UI", 9, "bold"),
+            borderwidth=0, padx=14, pady=4
+        )
+        self.gpu_toggle_btn.pack(side=tk.RIGHT)
+        self._refresh_gpu_mode_ui()
+
+        # VRAM progress bar
+        vram_bar_row = ttk.Frame(self.gpu_card)
+        vram_bar_row.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(vram_bar_row, text="VRAM Usage:", font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.vram_pct_label = ttk.Label(vram_bar_row, text="N/A", font=("Segoe UI", 9), foreground="#a78bfa")
+        self.vram_pct_label.pack(side=tk.RIGHT)
+        self.vram_bar = ttk.Progressbar(self.gpu_card, style="VRAM.Horizontal.TProgressbar", orient="horizontal", length=400, mode="determinate")
+        self.vram_bar.pack(fill=tk.X, pady=(4, 0))
+
+        # ── Resource Gauges ─────────────────────────────────────────────────
+        self.perf_card = ttk.LabelFrame(self.main_frame, text="System Resources", padding="12")
+        self.perf_card.pack(fill=tk.X, pady=(0, 12))
+
         perf_row = ttk.Frame(self.perf_card)
-        perf_row.pack(fill=tk.X)
-        
-        self.cpu_label = ttk.Label(perf_row, text="CPU: 0.0%", font=("Segoe UI", 10))
+        perf_row.pack(fill=tk.X, pady=(0, 6))
+        self.cpu_label = ttk.Label(perf_row, text="CPU: —", font=("Segoe UI", 10))
         self.cpu_label.pack(side=tk.LEFT, expand=True)
-        
-        self.ram_label = ttk.Label(perf_row, text="RAM: 0.0%", font=("Segoe UI", 10))
+        self.ram_label = ttk.Label(perf_row, text="RAM: —", font=("Segoe UI", 10))
         self.ram_label.pack(side=tk.LEFT, expand=True)
-        
         self.tasks_label = ttk.Label(perf_row, text="Active Tasks: 0", font=("Segoe UI", 10))
         self.tasks_label.pack(side=tk.LEFT, expand=True)
-        
-        # Control Buttons
+
+        # CPU progress bar
+        self.cpu_bar = ttk.Progressbar(self.perf_card, orient="horizontal", length=400, mode="determinate")
+        self.cpu_bar.pack(fill=tk.X, pady=(0, 4))
+        # RAM progress bar
+        self.ram_bar = ttk.Progressbar(self.perf_card, orient="horizontal", length=400, mode="determinate")
+        self.ram_bar.pack(fill=tk.X)
+
+        # ── Control Buttons ─────────────────────────────────────────────────
         self.control_row = ttk.Frame(self.main_frame)
-        self.control_row.pack(fill=tk.X, side=tk.BOTTOM)
-        
+        self.control_row.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+
         self.exit_btn = tk.Button(
-            self.control_row, 
-            text="Exit Listener", 
-            command=self.on_exit, 
-            font=("Segoe UI", 10), 
-            bg="#374151", 
-            fg="white", 
-            activebackground="#4b5563", 
-            activeforeground="white", 
-            borderwidth=0, 
-            padx=15, 
-            pady=8
+            self.control_row, text="Exit Listener", command=self.on_exit,
+            font=("Segoe UI", 10), bg="#374151", fg="white",
+            activebackground="#4b5563", activeforeground="white",
+            borderwidth=0, padx=15, pady=8
         )
         self.exit_btn.pack(side=tk.LEFT)
-        
+
         self.toggle_btn = tk.Button(
-            self.control_row, 
-            text="Start Server Manually", 
-            command=self.toggle_server, 
-            font=("Segoe UI", 10, "bold"), 
-            bg="#8b5cf6", 
-            fg="white", 
-            activebackground="#7c3aed", 
-            activeforeground="white", 
-            borderwidth=0, 
-            padx=20, 
-            pady=8
+            self.control_row, text="Start Server Manually", command=self.toggle_server,
+            font=("Segoe UI", 10, "bold"), bg="#8b5cf6", fg="white",
+            activebackground="#7c3aed", activeforeground="white",
+            borderwidth=0, padx=20, pady=8
         )
         self.toggle_btn.pack(side=tk.RIGHT)
-        
+
         # Start server and tunnel automatically on listener boot
         self.start_server_bg()
-        
+
         # Start the loops
         self.poll_requests()
         self.poll_system_stats()
+        self.poll_vram()
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
         
     def copy_url(self):
@@ -431,25 +468,64 @@ class ListenerDashboard(tk.Tk):
         self.after(0, self.on_server_stopped)
         
     def on_server_started(self):
-        self.state_indicator.config(text="ONLINE", foreground="#10b981") # green
+        self.state_indicator.config(text="\u25cf ONLINE", foreground="#10b981")
         self.url_label.config(state="normal")
         self.url_label.delete(0, tk.END)
         self.url_label.insert(0, tunnel_url)
         self.url_label.config(state="readonly")
-        
         self.toggle_btn.config(state="normal", text="Stop Server Manually", bg="#ef4444", activebackground="#dc2626")
         
     def on_server_stopped(self):
-        self.state_indicator.config(text="OFFLINE", foreground="#ef4444") # red
+        self.state_indicator.config(text="\u25cf OFFLINE", foreground="#ef4444")
         self.url_label.config(state="normal")
         self.url_label.delete(0, tk.END)
         self.url_label.insert(0, "Not established")
         self.url_label.config(state="readonly")
-        
         self.toggle_btn.config(state="normal", text="Start Server Manually", bg="#8b5cf6", activebackground="#7c3aed")
         
     def reset_buttons(self):
         self.toggle_btn.config(state="normal", text="Start Server Manually", bg="#8b5cf6", activebackground="#7c3aed")
+
+    # ── GPU / RAM Mode Toggle ──────────────────────────────────────────────
+    def _refresh_gpu_mode_ui(self):
+        """Sync mode label and toggle button text with current use_gpu_mode state."""
+        global use_gpu_mode
+        if use_gpu_mode:
+            self.mode_label.config(text="\u26a1 GPU Mode (VRAM)  ", foreground="#a78bfa")
+            self.gpu_toggle_btn.config(text="Switch to CPU (RAM)", bg="#1e293b", fg="#94a3b8",
+                                       activebackground="#334155", activeforeground="white")
+        else:
+            self.mode_label.config(text="\U0001f4be CPU Mode (RAM)  ", foreground="#f59e0b")
+            self.gpu_toggle_btn.config(text="Switch to GPU (VRAM)", bg="#8b5cf6", fg="white",
+                                       activebackground="#7c3aed", activeforeground="white")
+
+    def toggle_compute_mode(self):
+        """Toggle between GPU (VRAM) and CPU (RAM) compute mode."""
+        global use_gpu_mode
+        use_gpu_mode = not use_gpu_mode
+        if use_gpu_mode:
+            os.environ["FORCE_CPU"] = "0"
+            logger.info("Compute mode switched to: GPU (VRAM)")
+        else:
+            os.environ["FORCE_CPU"] = "1"
+            logger.info("Compute mode switched to: CPU (RAM)")
+        self._refresh_gpu_mode_ui()
+
+    def poll_vram(self):
+        """Update VRAM usage bar every 2 seconds."""
+        info = _get_vram_info()
+        if info is not None:
+            used_mb, total_mb = info
+            pct = (used_mb / total_mb) * 100 if total_mb > 0 else 0
+            self.vram_bar["value"] = pct
+            self.vram_pct_label.config(
+                text=f"{used_mb:.0f} MB / {total_mb:.0f} MB  ({pct:.1f}%)",
+                foreground="#ef4444" if pct > 85 else "#a78bfa"
+            )
+        else:
+            self.vram_bar["value"] = 0
+            self.vram_pct_label.config(text="No GPU detected", foreground="#64748b")
+        self.after(2000, self.poll_vram)
         
     def poll_requests(self):
         """Poll database for pending video generation jobs (status = 'pending_approval')."""
@@ -494,20 +570,21 @@ class ListenerDashboard(tk.Tk):
         self.after(3000, self.poll_requests)
         
     def poll_system_stats(self):
-        """Check system RAM/CPU and update dashboard."""
+        """Check system RAM/CPU and update dashboard gauges."""
         cpu = psutil.cpu_percent()
         ram = psutil.virtual_memory().percent
         self.cpu_label.config(text=f"CPU: {cpu:.1f}%")
         self.ram_label.config(text=f"RAM: {ram:.1f}%")
-        
+        self.cpu_bar["value"] = cpu
+        self.ram_bar["value"] = ram
+
         if is_running_server:
-            # Query DB for active tasks
             fut = run_async(database.get_server_status())
             self.after(500, lambda: self.update_active_tasks(fut))
         else:
             self.tasks_label.config(text="Active Tasks: 0")
             self.after(3000, self.poll_system_stats)
-            
+
     def update_active_tasks(self, fut):
         if not fut.done():
             self.after(100, lambda: self.update_active_tasks(fut))

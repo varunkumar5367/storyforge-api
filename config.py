@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     env: str = "development"
     port: int = 8000
 
+    # ── Local GPU & Models Configuration ──────────────────────────────────────
+    use_local_llm: bool = False
+    use_local_images: bool = False
+    use_local_whisper: bool = False
+    ollama_url: str = "http://localhost:11434/v1"
+    ollama_model: str = "qwen2.5:7b-instruct"
+    local_image_model: str = "ByteDance/SDXL-Lightning-4step"
+    local_whisper_model: str = "small"
+
     # ── Image generation providers (optional — fallback chain) ────────────────
     gemini_api_key: Optional[str] = None
     huggingface_api_key: Optional[str] = None

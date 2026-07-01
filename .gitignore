@@ -30,6 +30,13 @@ env/
 # Output files (large binary assets)
 output/
 
+# Logs
+logs/
+*.log
+
+# Scratch / test outputs (dev only)
+scratch/test_outputs/
+
 # IDE
 .vscode/
 .idea/

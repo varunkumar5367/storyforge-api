@@ -478,6 +478,133 @@ async def _download_with_retry(
     )
 
 
+async def _download_local_diffusers(
+    prompt: str,
+    seed: int,
+    scene_number: int,
+    *,
+    width: int = IMAGE_WIDTH,
+    height: int = IMAGE_HEIGHT,
+) -> tuple[bytes, str | None]:
+    """Generate an image locally using PyTorch diffusers."""
+    import gc
+    import torch
+    import io
+
+    def _generate():
+        from diffusers import StableDiffusionXLPipeline, DiffusionPipeline, EulerDiscreteScheduler
+        import os
+        
+        # Check if FORCE_CPU override is set (from GUI RAM/VRAM toggle)
+        force_cpu = os.environ.get("FORCE_CPU", "0").strip().lower() in ("1", "true", "yes")
+        
+        # Determine device
+        device = "cpu" if force_cpu else ("cuda" if torch.cuda.is_available() else "cpu")
+        torch_dtype = torch.float16 if device == "cuda" else torch.float32
+        logger.info("Diffusers device selected: %s (FORCE_CPU=%s)", device, force_cpu)
+        
+        model_id = settings.local_image_model
+        pipe = None
+        
+        try:
+            logger.info("Loading local diffusers model: %s on %s", model_id, device)
+            
+            if model_id == "ByteDance/SDXL-Lightning-4step":
+                # Use official SDXL-Lightning 4-step recipe
+                from diffusers import UNet2DConditionModel
+                from huggingface_hub import hf_hub_download
+                from safetensors.torch import load_file
+                
+                base = "stabilityai/stable-diffusion-xl-base-1.0"
+                repo = "ByteDance/SDXL-Lightning"
+                ckpt = "sdxl_lightning_4step_unet.safetensors"
+                
+                logger.info("Fetching unet config from %s and checkpoint %s from %s", base, ckpt, repo)
+                unet = UNet2DConditionModel.from_config(base, subfolder="unet")
+                unet.load_state_dict(load_file(hf_hub_download(repo, ckpt), device="cpu"))
+                
+                try:
+                    pipe = StableDiffusionXLPipeline.from_pretrained(
+                        base,
+                        unet=unet,
+                        torch_dtype=torch_dtype,
+                        variant="fp16" if device == "cuda" else None,
+                    )
+                except (ValueError, OSError):
+                    logger.warning("Failed loading SDXL with variant='fp16', retrying without variant")
+                    pipe = StableDiffusionXLPipeline.from_pretrained(
+                        base,
+                        unet=unet,
+                        torch_dtype=torch_dtype,
+                    )
+                pipe.scheduler = EulerDiscreteScheduler.from_config(
+                    pipe.scheduler.config,
+                    timestep_spacing="trailing"
+                )
+            else:
+                # Load generic model directly
+                try:
+                    pipe = DiffusionPipeline.from_pretrained(
+                        model_id,
+                        torch_dtype=torch_dtype,
+                        variant="fp16" if device == "cuda" else None,
+                    )
+                except (ValueError, OSError):
+                    logger.warning("Failed loading model %s with variant='fp16', retrying without variant", model_id)
+                    pipe = DiffusionPipeline.from_pretrained(
+                        model_id,
+                        torch_dtype=torch_dtype,
+                    )
+                
+            pipe = pipe.to(device)
+            
+            # Enforce safety checker bypass (optional, to save memory/speed)
+            if hasattr(pipe, "safety_checker") and pipe.safety_checker is not None:
+                pipe.safety_checker = None
+                
+            # Set up seed/generator
+            generator = torch.Generator(device=device).manual_seed(seed)
+            
+            # Run image generation
+            # Note: for SDXL-Lightning/LCM we use 4 steps. For others we default to 25.
+            num_inference_steps = 4 if "lightning" in model_id.lower() or "lcm" in model_id.lower() or "turbo" in model_id.lower() else 25
+            guidance_scale = 0.0 if "lightning" in model_id.lower() or "turbo" in model_id.lower() else 7.5
+            
+            logger.info("Generating local image | steps=%d | guidance=%.1f", num_inference_steps, guidance_scale)
+            
+            output = pipe(
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+            )
+            
+            image = output.images[0]
+            
+            # Convert PIL image to bytes
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            return buf.getvalue()
+            
+        finally:
+            if pipe is not None:
+                del pipe
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+    try:
+        img_bytes = await asyncio.to_thread(_generate)
+        if img_bytes:
+            return img_bytes, None
+        return b"", "Local diffusers returned no image data"
+    except Exception as exc:
+        logger.exception("Local diffusers image generation failed")
+        return b"", f"Local diffusers error: {exc}"
+
+
 async def _try_all_providers(
     client: httpx.AsyncClient,
     prompt: str,
@@ -488,10 +615,19 @@ async def _try_all_providers(
     height: int = IMAGE_HEIGHT,
 ) -> tuple[bytes, str | None, str | None]:
     """
-    Provider chain: Gemini → Hugging Face Paid → Pollinations → Stable Horde → HF Free → PIL Placeholder.
-
+    Provider chain: Local Diffusers → Gemini → Hugging Face Paid → Pollinations → Stable Horde → HF Free → PIL Placeholder.
+ 
     Returns (bytes, provider, error) where error is None on success.
     """
+    # 0. Local Diffusers
+    if settings.use_local_images:
+        local_bytes, local_err = await _download_local_diffusers(
+            prompt, seed, scene_number, width=width, height=height
+        )
+        if local_err is None and local_bytes:
+            return local_bytes, "local_diffusers", None
+        logger.warning("Scene %03d | provider=local_diffusers failed: %s", scene_number, local_err)
+
     # 1. Gemini
     gemini_bytes, gemini_err = await _download_gemini(prompt, scene_number, width=width, height=height)
     if gemini_err is None and gemini_bytes:
