@@ -98,73 +98,21 @@ async def get_voice_sample(voice_id: str):
 
 @router.get(
     "/pollen/balance",
-    summary="Get Pollinations balance and remaining images estimate",
+    summary="Get user credit balance and remaining images estimate",
 )
 async def get_pollen_balance(current_user: dict = Depends(get_current_user)):
     """
-    For non-admin, returns remaining hourly picture budget.
-    For admin, queries gen.pollinations.ai/account/balance.
+    Returns remaining hourly picture budget based on database quota.
     """
-    if current_user.get("role") != "admin":
-        used = await count_user_images_last_hour(current_user["id"])
-        budget = current_user.get("pollen_balance", 20.0)
-        remaining = max(0.0, budget - used)
-        return {
-            "success": True,
-            "pollen": float(remaining),
-            "images_left": int(remaining),
-            "message": f"Free tier hourly budget: {remaining:.4f} of {budget:.4f} images remaining (refreshes hourly)."
-        }
-
-    key = settings.pollinations_api_key
-    if not key:
-        return {
-            "success": True,
-            "pollen": None,
-            "images_left": None,
-            "message": "No API key configured (using unauthenticated IP-based limit)."
-        }
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                "https://gen.pollinations.ai/account/balance",
-                headers={"Authorization": f"Bearer {key}"}
-            )
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                balance = data.get("balance", 0.0)
-                # 0.00175 pollen per Flux Schnell image
-                images_left = int(balance / 0.00175) if balance > 0 else 0
-                return {
-                    "success": True,
-                    "pollen": balance,
-                    "images_left": images_left
-                }
-            elif resp.status_code == 403:
-                data = resp.json().get("error", {})
-                msg = data.get("message", "API key is missing permissions.")
-                return {
-                    "success": False,
-                    "error_type": "FORBIDDEN",
-                    "error": msg,
-                    "message": "Please go to enter.pollinations.ai, create a new key and make sure you check 'account:usage' scope."
-                }
-            else:
-                return {
-                    "success": False,
-                    "error_type": "HTTP_ERROR",
-                    "error": f"Pollinations returned status code {resp.status_code}",
-                    "message": resp.text[:200]
-                }
-    except Exception as e:
-        return {
-            "success": False,
-            "error_type": "EXCEPTION",
-            "error": str(e),
-            "message": "Could not connect to Pollinations API."
-        }
+    used = await count_user_images_last_hour(current_user["id"])
+    budget = current_user.get("pollen_balance", 20.0)
+    remaining = max(0.0, budget - used)
+    return {
+        "success": True,
+        "pollen": float(remaining),
+        "images_left": int(remaining),
+        "message": f"Hourly budget: {remaining:.1f} of {budget:.1f} 🍫 Choco remaining (refreshes hourly)."
+    }
 
 
 @router.get(
